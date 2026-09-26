@@ -1,0 +1,5 @@
+dr_wav and dr_mp3
+https://github.com/mackron/dr_libs
+Commit: dfe8377631000664666519fdb83da193fd8037f4
+License: MIT No Attribution (alternative 2 in LICENSE)
+Local change: initialize the guarded dr_wav fileSize variable to silence MSVC C4701.
