@@ -23,6 +23,7 @@
 #include "character_sheet.h"
 #include "mythic_sounds.h"
 #include "wishing_well.h"
+#include "fit_client.h"
 
 
 
@@ -334,6 +335,9 @@ static LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wparam
             return 0;
         }
         if (context && !shuttingDown) {
+            if (addonsOpen && FitCapture(message, wparam)) consume = true;
+        }
+        if (context && !shuttingDown && !consume) {
             const auto previousDraft=draftVisibilityHotkey;
             auto binding=visibilityHotkey;
             if (!hotkeyInput.recording && worldVisible && nativeHotkeyTest && (message==WM_KEYDOWN || message==WM_SYSKEYDOWN) && wparam==binding.key && nativeHotkeyTest(binding.key,binding.modifiers,true)!=AddonHotkeyState::Available) binding={0,0};
@@ -1147,6 +1151,7 @@ static void DrawHistory() {
 
 static void BackFromAddons() {
     hotkeyInput.recording=false;
+    FitStopTyping();
     if (activeAddon && std::strcmp(activeAddon->id,"nameplates") == 0 && nameplatePage) {
         draftNameplateOptions = nameplatePageOptions;
         nameplatePage = 0;
@@ -1776,6 +1781,68 @@ static void DrawExtensionSettings(UiPoint origin,UiPoint scale) {
     if (DrawSkinControl("Back",point(185,232),scale)) activeAddon=nullptr;
 }
 
+static void OpenFitSettings() {
+    FitStopTyping();
+}
+
+static UiColor FitToneColor(int tone) {
+    if (tone == 1) return GoldColor;
+    if (tone == 2) return MutedColor;
+    if (tone == 3) return UI_COLOR(110, 170, 255, 255);
+    if (tone == 4) return UI_COLOR(255, 196, 64, 255);
+    if (tone == 5) return UI_COLOR(255, 96, 196, 255);
+    return BodyColor;
+}
+
+static void DrawFitSettings(UiPoint origin, UiPoint scale) {
+    auto point = [origin, scale](float x, float y) { return At(origin, scale, x, y); };
+    UiDrawList* draw = Ui::GetWindowDrawList();
+    FitView view{};
+    char query[65]{};
+    char others[7][65]{};
+    int otherCount = 0;
+    bool typing = false;
+    FitSnapshot(view, query, sizeof(query), others, otherCount, typing);
+    Heading(draw, "Fit", point(34, 20), scale, 280);
+    char field[72];
+    if (typing) snprintf(field, sizeof(field), "%s_", query[0] ? query : "");
+    else snprintf(field, sizeof(field), "%s", query[0] ? query : "Type a name");
+    if (SkinControl("fit-name", field, point(16, 52), UiPoint(190 * scale.x, 32 * scale.y), scale)) FitBeginTyping();
+    if (Ui::IsItemHovered()) QueueHelp("Name of someone else. Enter looks them up. Escape stops typing.", point(355, 52), scale, origin.x);
+    if (SkinControl("fit-lookup", "Look up", point(214, 52), UiPoint(116 * scale.x, 32 * scale.y), scale) && query[0]) FitQuery(query);
+    if (Ui::IsItemHovered()) QueueHelp("Loads that character's gear and skill tray from Fit.", point(355, 52), scale, origin.x);
+    float top = 96;
+    if (otherCount) {
+        BodyText(draw, "Someone else in the party", point(24, 92), scale, MutedColor, 300 * scale.x);
+        for (int i = 0; i < otherCount; ++i) {
+            char id[24];
+            snprintf(id, sizeof(id), "fit-party-%d", i);
+            const float x = (i % 2) ? 180.f : 16.f;
+            const float y = 114.f + (i / 2) * 34.f;
+            if (SkinControl(id, others[i], point(x, y), UiPoint(150 * scale.x, 28 * scale.y), scale)) FitQuery(others[i]);
+        }
+        top = 114.f + ((otherCount + 1) / 2) * 34.f + 8.f;
+    }
+    const float sheet = 400.f - top;
+    if (view.status[0]) BodyText(draw, view.status, point(24, top), scale, GoldColor, 300 * scale.x);
+    const float listTop = view.status[0] ? top + 28.f : top;
+    Ui::SetCursorScreenPos(point(16, listTop));
+    if (Ui::BeginChild("fit-sheet", UiPoint(318 * scale.x, std::max(40.f, sheet - (view.status[0] ? 28.f : 0.f)) * scale.y), 0, 0)) {
+        float y = 4 * scale.y;
+        auto* list = Ui::GetWindowDrawList();
+        const UiPoint cursor = Ui::GetCursorScreenPos();
+        if (!view.count && !view.status[0]) MeterText(list, "Type a name, or pick someone else in the party.", UiPoint(cursor.x + 8 * scale.x, cursor.y + y), scale, MutedColor, 290 * scale.x);
+        for (int i = 0; i < view.count; ++i) {
+            MeterText(list, view.lines[i].text, UiPoint(cursor.x + 8 * scale.x, cursor.y + y), scale, FitToneColor(view.lines[i].tone), 290 * scale.x);
+            y += 18 * scale.y;
+        }
+        Ui::Dummy(UiPoint(300 * scale.x, y + 8 * scale.y));
+    }
+    Ui::EndChild();
+    if (DrawSkinControl("Back", point(104.5f, 418), scale, &cancelRect)) { FitStopTyping(); activeAddon = nullptr; }
+    if (Ui::IsItemHovered()) QueueHelp("Returns to Addons.", point(355, 418), scale, origin.x);
+}
+
 static void DiscoverAddons(const std::filesystem::path& root) {
     addonRegistry.Discover(root);
     registeredAddons.clear();
@@ -1786,6 +1853,7 @@ static void DiscoverAddons(const std::filesystem::path& root) {
     if (addonRegistry.CharacterSheet()) registeredAddons.push_back({"better-character-sheet","Better Character Sheet","Shows Weapon Crit, Magic Crit, Stun Resist and Movement.",OpenCharacterSheetSettings,DrawCharacterSheetSettings,nullptr});
     if (addonRegistry.MythicSounds()) registeredAddons.push_back({"mythic-drop-sounds","Mythic Drop Sounds","Sound and chat alerts for Mythic drops.",OpenMythicSettings,DrawMythicSettings,nullptr});
     if (addonRegistry.WishingWell()) registeredAddons.push_back({"wishing-well-tracker","Wishing Well Tracker","Cooldown and login reminders with separate sounds.",OpenWellSettings,DrawWellSettings,nullptr});
+    if (addonRegistry.Fit()) registeredAddons.push_back({"fit","Fit","Look up someone else's gear and skill tray.",OpenFitSettings,DrawFitSettings,nullptr});
     for (const auto& extension:addonRegistry.Extensions()) registeredAddons.push_back({extension.id,extension.name,extension.description,OpenExtensionSettings,DrawExtensionSettings,&extension,addonRegistry.Settings(extension)});
 }
 
@@ -1830,7 +1898,7 @@ static void DrawAddons() {
     }
     if (addonsOpen) {
         const float listHeight = std::clamp(static_cast<float>(registeredAddons.size())*48,48.0f,192.0f);
-        const float height = activeAddon ? (activeAddon->advanced ? 506.0f : activeAddon->open == OpenWellSettings ? 518.0f : activeAddon->open == OpenDamageSettings ? 390.0f : activeAddon->open == OpenNameplateSettings && !nameplatePage ? 340.0f : activeAddon->open == OpenMythicSettings ? 365.0f : 289.0f) : 125+listHeight;
+        const float height = activeAddon ? (activeAddon->open == OpenFitSettings ? 470.0f : activeAddon->advanced ? 506.0f : activeAddon->open == OpenWellSettings ? 518.0f : activeAddon->open == OpenDamageSettings ? 390.0f : activeAddon->open == OpenNameplateSettings && !nameplatePage ? 340.0f : activeAddon->open == OpenMythicSettings ? 365.0f : 289.0f) : 125+listHeight;
         const UiPoint scale = FitScale(buttonScale,UiPoint(350,height));
         const UiPoint panelSize(350 * scale.x,height * scale.y);
         const UiPoint origin(std::floor((display.x-panelSize.x)*0.5f),std::floor((display.y-panelSize.y)*0.5f));
@@ -2158,6 +2226,10 @@ extern "C" void __cdecl MeterOverlayReportState(bool party,bool busy,const char*
     reportDestination = destination ? *destination : ReportContext{};
 }
 
+extern "C" __declspec(dllexport) void __cdecl MeterOverlayFitOthers(const char* packed, int count) {
+    FitSetOthers(packed, count);
+}
+
 extern "C" __declspec(dllexport) bool __cdecl MeterOverlayEnabled() {
     Lock lock;
     return addonRegistry.Damage() && measurementEnabled;
@@ -2169,6 +2241,7 @@ extern "C" __declspec(dllexport) void __cdecl MeterOverlayWorld(bool shown) {
     if (!shown) { characterSheetFrame = {}; cooldownFrame = {}; effectFrame = {}; cooldownHighlights.Reset(); }
     if (!shown) {
         hotkeyInput.recording=false; hotkeyMessage.clear();
+        FitStopTyping();
         EndPanelResize(); hitCount = 0; dragging = false; wellTimerArea = {};
         addonsOpen = historyOpen = panelOptionsOpen = false;
         activeAddon = nullptr; addonsButtonRect = {}; consumeEscapeUp = false;

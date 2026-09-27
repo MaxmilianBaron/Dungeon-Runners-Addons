@@ -32,6 +32,7 @@ extern "C" void __cdecl MeterOverlayInvalidate();
 extern "C" unsigned __cdecl MeterOverlayStatus();
 extern "C" bool __cdecl MeterOverlayEnabled();
 extern "C" bool __cdecl MeterOverlayAddonsOpen();
+extern "C" void __cdecl MeterOverlayFitOthers(const char*, int);
 extern "C" void __cdecl MeterOverlayWorld(bool);
 extern "C" bool __cdecl MeterOverlayHideGold();
 extern "C" unsigned __cdecl MeterOverlayNameplates();
@@ -351,6 +352,17 @@ static void RefreshUi(const NativeReader& reader) {
                 else history.Pause(true);
             } else history.Pause();
             nextRoster = now + (rosterReady ? 500 : 100);
+            if (rosterReady) {
+                char fitPacked[7][65]{};
+                int fitCount = 0;
+                for (size_t i = 1; i < members.size() && fitCount < 7; ++i) {
+                    const std::string& person = members[i].name;
+                    if (person.empty() || person.size() >= 65 || person.rfind("Player ", 0) == 0) continue;
+                    memcpy(fitPacked[fitCount], person.c_str(), person.size() + 1);
+                    ++fitCount;
+                }
+                MeterOverlayFitOthers(fitPacked[0], fitCount);
+            }
         }
         InterlockedExchange(&collecting, shown && meter.HasRoster() && meter.Enabled() ? 1 : 0);
         if (now >= nextSnapshot) {
@@ -361,6 +373,7 @@ static void RefreshUi(const NativeReader& reader) {
         history.Save(now);
         if (now >= nextHistory) { history.Share(historySnapshot,now); MeterOverlaySharedHistory(&historySnapshot); nextHistory=now+1000; }
     }
+    if (!shown) MeterOverlayFitOthers(nullptr, 0);
     MeterOverlayWorld(shown);
     characterSheet.Prepare(reader,image,MeterOverlayCharacterSheetEnabled(),shown,now,SetSheetGeometry);
     InterlockedExchange(reinterpret_cast<volatile LONG*>(&CharacterSheetVisualTarget),static_cast<LONG>(characterSheet.VisualTarget()));

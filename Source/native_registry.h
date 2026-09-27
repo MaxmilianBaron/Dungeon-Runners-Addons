@@ -9,7 +9,7 @@
 class AddonRegistry {
     std::vector<ExtensionDefinition> extensions;
     std::vector<ExtensionSettings> settings;
-    bool damage = false, money = false, cooldowns = false, nameplates = false, characterSheet = false, mythicSounds = false, wishingWell = false;
+    bool damage = false, money = false, cooldowns = false, nameplates = false, characterSheet = false, mythicSounds = false, wishingWell = false, fit = false;
     unsigned rejected = 0;
 
     static bool Plain(const char* value,size_t size) {
@@ -65,7 +65,7 @@ public:
         return true;
     }
     void Discover(const std::filesystem::path& root) {
-        extensions.clear(); settings.clear(); damage=money=cooldowns=nameplates=characterSheet=mythicSounds=wishingWell=false; rejected=0;
+        extensions.clear(); settings.clear(); damage=money=cooldowns=nameplates=characterSheet=mythicSounds=wishingWell=fit=false; rejected=0;
         std::error_code error;
         if (!Regular(root,true)) return;
         std::vector<std::filesystem::path> directories;
@@ -86,9 +86,10 @@ public:
             if (builtin=="BetterCharacterSheet" && id=="better-character-sheet") { characterSheet=true; continue; }
             if (builtin=="MythicDropSounds" && id=="mythic-drop-sounds") { mythicSounds=true; continue; }
             if (builtin=="WishingWellTracker" && id=="wishing-well-tracker") { wishingWell=true; continue; }
+            if (builtin=="Fit" && id=="fit") { fit=true; continue; }
             if (builtin=="Nameplates" && id=="nameplates") { nameplates=true; continue; }
             if ((builtin=="HideGoldLabels" && id=="hide-gold-labels") || (builtin=="HideMoneyBoxes" && id=="hide-money-boxes")) { money=true; continue; }
-            if (!builtin.empty() || id=="damage-meter" || id=="hide-gold-labels" || id=="hide-money-boxes" || id=="cooldown-timers" || id=="nameplates" || id=="better-character-sheet" || id=="mythic-drop-sounds" || id=="wishing-well-tracker") { ++rejected; continue; }
+            if (!builtin.empty() || id=="damage-meter" || id=="hide-gold-labels" || id=="hide-money-boxes" || id=="cooldown-timers" || id=="nameplates" || id=="better-character-sheet" || id=="mythic-drop-sounds" || id=="wishing-well-tracker" || id=="fit") { ++rejected; continue; }
             const auto modulePath=directory/L"Addon.dll";
             if (!Regular(modulePath)) { ++rejected; continue; }
             const auto module=LoadLibraryExW(modulePath.c_str(),nullptr,LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR|LOAD_LIBRARY_SEARCH_SYSTEM32);
@@ -118,6 +119,7 @@ public:
     bool CharacterSheet() const { return characterSheet; }
     bool MythicSounds() const { return mythicSounds; }
     bool WishingWell() const { return wishingWell; }
+    bool Fit() const { return fit; }
     bool Nameplates() const { return nameplates; }
     unsigned Rejected() const { return rejected; }
     const std::vector<ExtensionDefinition>& Extensions() const { return extensions; }
