@@ -1,6 +1,13 @@
 .build/
 /Tests/
-/Tools/
+/Tools/*
+!/Tools/build.ps1
+!/Tools/build_native_catalog.py
+!/Tools/build_native_skin.py
+!/Tools/catalog.py
+!/Tools/critical_catalog.py
+!/Tools/definitions.py
+!/Tools/package_index.py
 __pycache__/
 .pytest_cache/
 *.pyc
