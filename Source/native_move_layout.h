@@ -8,19 +8,22 @@ public:
     using Geometry = std::array<int32_t,4>;
     using Setter = bool (*)(uintptr_t,const Geometry&,unsigned,bool);
     using Layout = bool (*)(uintptr_t);
+    static constexpr unsigned DrawTargetCount = 7;
 private:
+    enum : unsigned { MapZoomIn = MovePanelCount, MapZoomOut, MapLabel, ChatGrip, EntryCount };
+    inline static constexpr std::array<unsigned,DrawTargetCount> DrawEntries = {0,1,2,unsigned(MovePanel::Buffs),MapZoomIn,MapZoomOut,MapLabel};
     struct Entry {
         uintptr_t node = 0, parent = 0, type = 0;
         Geometry base{}, applied{};
         bool captured = false, changed = false;
     };
-    std::array<Entry,9> entries{};
+    std::array<Entry,EntryCount> entries{};
     struct ScaledPart {
         uintptr_t node = 0, parent = 0, type = 0;
         Geometry base{}, applied{};
     };
-    std::array<std::vector<ScaledPart>,9> scaledParts;
-    uintptr_t root = 0, playerRoot = 0, playerPanel = 0;
+    std::array<std::vector<ScaledPart>,EntryCount> scaledParts;
+    uintptr_t root = 0, playerRoot = 0, playerPanel = 0, buffPanel = 0;
     MoveLayoutSettings settings;
     MoveLayoutFrame frame;
     bool enabled = false;
@@ -121,11 +124,12 @@ private:
     }
 public:
     uintptr_t DrawTarget(unsigned index) const {
-        const unsigned entry = index < 3 ? index : index+2;
-        return index < 6 && (enabled || entries[entry].changed) ? entries[entry].node : 0;
+        if (index >= DrawEntries.size()) return 0;
+        const auto& entry = entries[DrawEntries[index]];
+        return enabled || entry.changed ? entry.node : 0;
     }
     int BeginDraw(const NativeReader& r,uintptr_t node,Setter setter,Geometry& natural,Geometry& displayed) {
-        for (unsigned i : {0u,1u,2u,5u,6u,7u}) {
+        for (unsigned i : DrawEntries) {
             const auto& entry = entries[i];
             if (entry.node != node || !entry.changed || !entry.captured || entry.base[2] < 1 || entry.base[3] < 1 ||
                 r.Pointer(node) != entry.type || r.Pointer(node+0x14) != entry.parent) continue;
@@ -137,9 +141,9 @@ public:
         return -1;
     }
     void EndDraw(const NativeReader& r,uintptr_t image,unsigned index,Setter setter,Layout layout) {
-        if (index < 3 || (index >= 5 && index <= 7)) ScaleChildren(r,image,index,setter,layout);
+        if (std::find(DrawEntries.begin(),DrawEntries.end(),index) != DrawEntries.end()) ScaleChildren(r,image,index,setter,layout);
     }
-    void Reset() { entries = {}; for (auto& parts : scaledParts) parts.clear(); root = playerRoot = playerPanel = 0; frame = {}; enabled = false; }
+    void Reset() { entries = {}; for (auto& parts : scaledParts) parts.clear(); root = playerRoot = playerPanel = buffPanel = 0; frame = {}; enabled = false; }
     void BeginFrame(const NativeReader& r,uintptr_t image,uintptr_t control,Setter setter) {
         if (!root || control != root || r.Pointer(image+0x5314b0) != root || !setter) return;
         for (auto& parts : scaledParts) {
@@ -166,7 +170,9 @@ public:
         settings = value; enabled = installed && value.enabled && world;
         frame.width = float(width); frame.height = float(height); frame.visible = {};
         const auto status = r.Pointer(ui+0x274);
-        if (status != playerRoot || !playerPanel) { playerRoot = status; playerPanel = Find(r,status,"PlayerHealthAndMana"); }
+        if (status != playerRoot) { playerRoot = status; playerPanel = buffPanel = 0; }
+        if (!playerPanel) playerPanel = Find(r,status,"PlayerHealthAndMana");
+        if (!buffPanel) buffPanel = Find(r,status,"ModList");
         Select(r,image,0,playerPanel);
         Select(r,image,1,r.Pointer(ui+0x25c));
         Select(r,image,2,r.Pointer(ui+0x1f8));
@@ -174,10 +180,11 @@ public:
         const auto map = r.Pointer(ui+0x290);
         const bool smallMap = map && r.Pointer(map+0x14) == r.Pointer(ui+0x184) && !r.Pointer(map+0x11c);
         Select(r,image,4,smallMap ? map : 0);
-        Select(r,image,5,r.Pointer(ui+0x29c));
-        Select(r,image,6,r.Pointer(ui+0x2a0));
-        Select(r,image,7,r.Pointer(ui+0x27c));
-        Select(r,image,8,r.Pointer(r.Pointer(ui+0x21c)+0x2e8));
+        Select(r,image,unsigned(MovePanel::Buffs),buffPanel);
+        Select(r,image,MapZoomIn,r.Pointer(ui+0x29c));
+        Select(r,image,MapZoomOut,r.Pointer(ui+0x2a0));
+        Select(r,image,MapLabel,r.Pointer(ui+0x27c));
+        Select(r,image,ChatGrip,r.Pointer(r.Pointer(ui+0x21c)+0x2e8));
     }
     void BeforeChildren(const NativeReader& r,uintptr_t image,uintptr_t parent,Setter setter,Layout layout) {
         if (!root || !parent || !setter || !layout) return;
@@ -189,7 +196,7 @@ public:
             if (!Origin(r,parent,root,x,y,visible)) continue;
             uint32_t flags = 0;
             if (!r.Read(entry.node+0xb4,flags)) continue;
-            const unsigned owner = index < MovePanelCount ? index : index == 8 ? 3 : 4;
+            const unsigned owner = index < MovePanelCount ? index : index == ChatGrip ? unsigned(MovePanel::Chat) : unsigned(MovePanel::Minimap);
             const bool custom = enabled && settings.panels[owner].custom && (owner != 4 || entries[4].node);
             if ((custom || entry.changed) && (flags&0x40) && !layout(entry.node)) continue;
             Geometry current{};
@@ -212,7 +219,7 @@ public:
                     const auto before = Absolute(anchor.base,ax,ay);
                     const auto after = ResolveMoveRect(owner,settings.panels[owner],before,frame.width,frame.height);
                     auto bounds = Absolute(entry.base,x,y);
-                    if (index == 8) { bounds.x = after.x+after.width; bounds.y = after.y+(after.height-bounds.height)*0.5f; }
+                    if (index == ChatGrip) { bounds.x = after.x+after.width; bounds.y = after.y+(after.height-bounds.height)*0.5f; }
                     else {
                         const float sx = after.width/before.width, sy = after.height/before.height;
                         bounds.x = after.x+(bounds.x-before.x)*sx;

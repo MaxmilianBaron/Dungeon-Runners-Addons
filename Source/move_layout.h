@@ -6,7 +6,7 @@
 #include <istream>
 #include <ostream>
 
-enum class MovePanel : unsigned { Player, Party, Target, Chat, Minimap, Count };
+enum class MovePanel : unsigned { Player, Party, Target, Chat, Minimap, Buffs, Count };
 constexpr unsigned MovePanelCount = static_cast<unsigned>(MovePanel::Count);
 
 struct MoveRect {
@@ -18,9 +18,10 @@ struct MoveRect {
 };
 
 inline bool MoveResizable(unsigned panel) { return panel < MovePanelCount; }
+inline bool MoveFixedAspect(unsigned panel) { return panel < unsigned(MovePanel::Chat) || panel == unsigned(MovePanel::Buffs); }
 
 inline MoveRect FitMoveAspect(unsigned panel,MoveRect rect,const MoveRect& native,float width,float height) {
-    if (panel >= unsigned(MovePanel::Chat) || !rect.Valid() || !native.Valid()) return rect;
+    if (!MoveFixedAspect(panel) || !rect.Valid() || !native.Valid()) return rect;
     const float maximum = std::min({640.0f/native.width,640.0f/native.height,width/native.width,height/native.height});
     const float minimum = std::min(maximum,std::max(80.0f/native.width,20.0f/native.height));
     const float scale = std::clamp(rect.width/native.width,minimum,maximum);
@@ -43,9 +44,11 @@ struct MoveLayoutSettings {
     bool Load(std::istream& input) {
         MoveLayoutSettings value;
         unsigned version = 0, on = 0;
-        if (!(input >> version >> on) || version != 1 || on > 1) return false;
+        if (!(input >> version >> on) || (version != 1 && version != 2) || on > 1) return false;
         value.enabled = on != 0;
-        for (auto& panel : value.panels) {
+        const unsigned count = version == 1 ? unsigned(MovePanel::Buffs) : MovePanelCount;
+        for (unsigned i = 0; i < count; ++i) {
+            auto& panel = value.panels[i];
             unsigned custom = 0;
             if (!(input >> custom >> panel.x >> panel.y >> panel.width >> panel.height) || custom > 1 || !panel.Valid()) return false;
             panel.custom = custom != 0;
@@ -57,7 +60,7 @@ struct MoveLayoutSettings {
     }
     bool Write(std::ostream& output) const {
         for (const auto& panel : panels) if (!panel.Valid()) return false;
-        output << "1 " << (enabled ? 1 : 0) << '\n' << std::setprecision(9);
+        output << "2 " << (enabled ? 1 : 0) << '\n' << std::setprecision(9);
         for (const auto& panel : panels) output << (panel.custom ? 1 : 0) << ' ' << panel.x << ' ' << panel.y << ' ' << panel.width << ' ' << panel.height << '\n';
         return output.good();
     }

@@ -228,6 +228,15 @@ static bool WriteMoveClip(uintptr_t address,const std::array<int32_t,4>& clip) {
     __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
 }
 
+static void DrawEffectTimers(const NativeReader& reader) {
+    EffectFrame effects;
+    if (MeterOverlayEffectsEnabled()) NativeCooldowns(reader,image).SampleEffects(effects);
+    MeterOverlayEffects(&effects);
+    const auto graphics = reader.Pointer(image+0x533a44);
+    const auto device = reinterpret_cast<IDirect3DDevice9*>(reader.Pointer(graphics+0x1c));
+    MeterOverlayLayer(device,AddonUiLayer::Effects);
+}
+
 void __fastcall MoveControlDraw(uintptr_t control,uintptr_t function,uintptr_t event) {
     using Draw = void (__thiscall*)(void*,void*);
     const auto original = reinterpret_cast<Draw>(function);
@@ -281,6 +290,7 @@ void __fastcall MoveControlDraw(uintptr_t control,uintptr_t function,uintptr_t e
     const auto end = reader.Pointer(event+0x5c), begin = reader.Pointer(event+0x58);
     if (end >= begin && end-begin == clipEnd-clipBegin) WriteMoveClip(end-16,clip);
     moveLayout.EndDraw(reader,image,static_cast<unsigned>(panel),SetMoveGeometry,MovePendingLayout);
+    if (panel == int(MovePanel::Buffs) && reader.InWorld()) DrawEffectTimers(reader);
 }
 
 extern "C" void __fastcall CharacterSheetVisualDraw(uintptr_t visual,uintptr_t,uintptr_t event,SheetQuad area) {
@@ -422,7 +432,8 @@ static void RefreshUi(const NativeReader& reader) {
     const bool moveInstalled = MeterOverlayMoveSettings(&layoutSettings,nullptr);
     moveLayout.Prepare(reader,image,layoutSettings,moveInstalled,shown);
     MoveUiFrameTarget = ui;
-    for (unsigned i = 0; i < 6; ++i) MoveControlTargets[i] = moveLayout.DrawTarget(i);
+    static_assert(MoveControlTargetCount == NativeMoveLayout::DrawTargetCount);
+    for (unsigned i = 0; i < MoveControlTargetCount; ++i) MoveControlTargets[i] = moveLayout.DrawTarget(i);
     const unsigned actions = MeterOverlayStatus();
     const bool enabled = MeterOverlayEnabled();
     const bool cursorEnabled = MeterOverlayCursorEnabled();
@@ -644,9 +655,8 @@ static void Observe(unsigned kind, const HookRegisters& registers) {
             MeterOverlayCharacterSheet(&frame);
         }
         if (layer == AddonUiLayer::Effects) {
-            EffectFrame effects;
-            if (MeterOverlayEffectsEnabled()) NativeCooldowns(reader,image).SampleEffects(effects);
-            MeterOverlayEffects(&effects);
+            if (!MoveProjectionTarget) DrawEffectTimers(reader);
+            return;
         }
         const uintptr_t graphics = reader.Pointer(image + 0x533a44);
         const auto device = reinterpret_cast<IDirect3DDevice9*>(reader.Pointer(graphics + 0x1c));

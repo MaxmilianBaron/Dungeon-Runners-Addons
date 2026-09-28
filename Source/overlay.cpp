@@ -1501,7 +1501,7 @@ static MoveRect EditorMoveRect(unsigned panel) {
     auto rect = moveFrame.natural[panel].Valid() ? moveFrame.natural[panel] : moveFrame.panels[panel];
     const float width = logicalUiSize.x, height = logicalUiSize.y;
     if (!rect.Valid()) {
-        const MoveRect fallback[] = {{12,12,195,63},{8,98,150,120},{width*0.5f-70,14,140,25},{5,height-300,390,210},{width-208,8,200,200}};
+        const std::array<MoveRect,MovePanelCount> fallback = {{{12,12,195,63},{8,98,150,120},{width*0.5f-70,14,140,25},{5,height-300,390,210},{width-208,8,200,200},{209,11,480,76}}};
         rect = fallback[panel];
     }
     return draftMoveOptions.enabled ? ResolveMoveRect(panel,draftMoveOptions.panels[panel],rect,width,height) : rect;
@@ -1543,7 +1543,7 @@ static void DrawMoveEditor() {
         if (SkinControl("MoveBack","Back",At(origin,toolbarScale,321,78),UiPoint(141*toolbarScale.x,34*toolbarScale.y),toolbarScale,&moveBack)) BackFromAddons();
         if (!moveMessage.empty()) BodyText(draw,moveMessage.c_str(),At(origin,toolbarScale,20,113),UiPoint(toolbarScale.x*.75f,toolbarScale.y*.75f),GoldColor,440*toolbarScale.x);
         if (moveEditing) {
-            static constexpr const char* names[] = {"Player HP / Mana","Party UI","Target","Chat","Minimap"};
+            static constexpr std::array<const char*,MovePanelCount> names = {"Player HP / Mana","Party UI","Target","Chat","Minimap","Buffs / Curses"};
             auto& io = Ui::GetIO();
             if (!io.MouseDown[0]) moveSelected = -1;
             for (unsigned panel = 0; panel < MovePanelCount; ++panel) {
@@ -1554,7 +1554,7 @@ static void DrawMoveEditor() {
                     rect = moveDragStart;
                     if (moveResizing) {
                         if (panel == unsigned(MovePanel::Minimap)) rect.width = rect.height = moveDragStart.width+std::max(dx,dy);
-                        else if (panel < unsigned(MovePanel::Chat)) {
+                        else if (MoveFixedAspect(panel)) {
                             const float delta = std::abs(dx/moveDragStart.width) >= std::abs(dy/moveDragStart.height) ? dx/moveDragStart.width : dy/moveDragStart.height;
                             rect.width *= std::max(.1f,1+delta); rect.height *= std::max(.1f,1+delta);
                             rect = FitMoveAspect(panel,rect,moveDragStart,logicalUiSize.x,logicalUiSize.y);
@@ -2075,7 +2075,7 @@ static void DiscoverAddons(const std::filesystem::path& root) {
     if (addonRegistry.WishingWell()) registeredAddons.push_back({"wishing-well-tracker","Wishing Well Tracker","Cooldown and login reminders with separate sounds.",OpenWellSettings,DrawWellSettings,nullptr});
     if (addonRegistry.CombatCursor()) registeredAddons.push_back({"cursor-circle","Cursor Circle","Highlights the cursor during combat.",OpenCursorSettings,DrawCursorSettings,nullptr});
     if (addonRegistry.BankSort()) registeredAddons.push_back({"sort-bank-pages","Sort Bank Pages","Sort one bank page or all accessible pages.",OpenBankSettings,DrawBankSettings,nullptr});
-    if (addonRegistry.MoveEverything()) registeredAddons.push_back({"moveeverything","Moveeverything","Move player, party, target, chat and minimap panels.",OpenMoveSettings,DrawMoveSettings,nullptr});
+    if (addonRegistry.MoveEverything()) registeredAddons.push_back({"moveeverything","Moveeverything","Move player, party, target, chat, minimap and buff/curse panels.",OpenMoveSettings,DrawMoveSettings,nullptr});
     for (const auto& extension:addonRegistry.Extensions()) registeredAddons.push_back({extension.id,extension.name,extension.description,OpenExtensionSettings,DrawExtensionSettings,&extension,addonRegistry.Settings(extension)});
 }
 

@@ -13,7 +13,7 @@ void* MoveUiFrameOriginal = nullptr;
 volatile uintptr_t MoveUiFrameTarget = 0;
 void* MoveControlOriginal = nullptr;
 uintptr_t MoveControlContinue = 0;
-volatile uintptr_t MoveControlTargets[6] = {};
+volatile uintptr_t MoveControlTargets[MoveControlTargetCount] = {};
 void* MoveProjectionOriginal = nullptr;
 volatile uintptr_t MoveProjectionTarget = 0;
 void* MythicDropOriginal = nullptr;
@@ -85,6 +85,8 @@ extern "C" __declspec(naked) void MoveControlHook() {
     __asm cmp esi, dword ptr [MoveControlTargets+16]
     __asm je scaled
     __asm cmp esi, dword ptr [MoveControlTargets+20]
+    __asm je scaled
+    __asm cmp esi, dword ptr [MoveControlTargets+24]
     __asm je scaled
     __asm popfd
     __asm jmp dword ptr [MoveControlOriginal]
