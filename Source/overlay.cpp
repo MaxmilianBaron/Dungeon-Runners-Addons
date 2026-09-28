@@ -23,6 +23,9 @@
 #include "character_sheet.h"
 #include "mythic_sounds.h"
 #include "wishing_well.h"
+#include "combat_cursor.h"
+#include "bank_sort.h"
+#include "move_layout.h"
 
 
 
@@ -85,6 +88,25 @@ static bool mythicFailed = false;
 static bool mythicBrowse = false;
 static CustomSoundStatus mythicCustomStatus = CustomSoundStatus::None;
 static WellSettings wellOptions, draftWellOptions;
+static CombatCursorSettings cursorOptions, draftCursorOptions;
+static std::filesystem::path cursorSettings;
+static std::string cursorMessage;
+static uint64_t cursorCombatUntil = 0;
+static BankSortFrame bankFrame;
+static unsigned bankAction = 0;
+static bool bankEnabled = true, draftBankEnabled = true;
+static std::filesystem::path bankSettings;
+static std::string bankMessage;
+static RECT bankArea{};
+static MoveLayoutSettings moveOptions, draftMoveOptions;
+static MoveLayoutFrame moveFrame;
+static std::filesystem::path moveSettings;
+static std::string moveMessage;
+static bool moveEditing = false, moveResizing = false;
+static int moveSelected = -1;
+static MoveRect moveDragStart;
+static UiPoint moveDragMouse;
+static RECT moveToolbar{}, moveOkay{}, moveBack{}, moveReset{}, moveToggle{};
 static WellUiState wellState;
 static WellUiAction wellAction;
 static unsigned wellPage = 0;
@@ -92,6 +114,7 @@ static std::filesystem::path wellSettings;
 static std::string wellMessage;
 static RECT wellTimerArea{};
 static AddonInputTest characterInputTest = nullptr;
+static AddonInputTest bankInputTest = nullptr;
 static NameplateSettings nameplatePageOptions;
 static bool reportOpen = false, reportPending = false, reportBusy = false, reportParty = false;
 static MeterReport reportPreview, reportRequest;
@@ -248,6 +271,42 @@ static bool SaveCharacterSheetSettings() {
     return output.good() && MoveFileExW(pending.c_str(),characterSheetSettings.c_str(),MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
 }
 
+static bool SaveCursorSettings() {
+    if (cursorSettings.empty()) return false;
+    std::error_code error;
+    std::filesystem::create_directories(cursorSettings.parent_path(),error);
+    if (error) return false;
+    auto pending = cursorSettings; pending += L".pending";
+    std::ofstream output(pending,std::ios::trunc);
+    const bool written = draftCursorOptions.Write(output);
+    output.close();
+    return written && output.good() && MoveFileExW(pending.c_str(),cursorSettings.c_str(),MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
+}
+
+static bool SaveBankSettings() {
+    if (bankSettings.empty()) return false;
+    std::error_code error;
+    std::filesystem::create_directories(bankSettings.parent_path(),error);
+    if (error) return false;
+    auto pending = bankSettings; pending += L".pending";
+    std::ofstream output(pending,std::ios::trunc);
+    output << (draftBankEnabled ? 1 : 0) << '\n';
+    output.close();
+    return output.good() && MoveFileExW(pending.c_str(),bankSettings.c_str(),MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
+}
+
+static bool SaveMoveSettings() {
+    if (moveSettings.empty()) return false;
+    std::error_code error;
+    std::filesystem::create_directories(moveSettings.parent_path(),error);
+    if (error) return false;
+    auto pending = moveSettings; pending += L".pending";
+    std::ofstream output(pending,std::ios::trunc);
+    const bool written = draftMoveOptions.Write(output);
+    output.close();
+    return written && output.good() && MoveFileExW(pending.c_str(),moveSettings.c_str(),MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
+}
+
 static bool SaveMythicSettings(const MythicSettings& value = draftMythicOptions) {
     if (mythicSettings.empty() || value.sound >= std::size(MythicSounds) || value.volume > 100) return false;
     std::error_code error;
@@ -317,14 +376,17 @@ static bool MouseInside(LPARAM value) {
 }
 
 static bool InputAllowed(UiPoint point,bool menuLayer) {
-    if (!nativeInputTest) return true;
+    if (moveEditing) return true;
     const auto display = Ui::GetIO().DisplaySize;
+    const POINT pointer{static_cast<LONG>(point.x),static_cast<LONG>(point.y)};
+    if (bankInputTest && bankFrame.visible && PtInRect(&bankArea,pointer) && display.x > 0 && display.y > 0) return bankInputTest(point.x/display.x,point.y/display.y,false);
+    if (!nativeInputTest) return true;
     return display.x > 0 && display.y > 0 && nativeInputTest(point.x / display.x,point.y / display.y,menuLayer);
 }
 
 static LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
     WNDPROC original;
-    bool consume = false;
+    bool consume = false, nativeBankClose = false;
     {
         Lock lock;
         original = previousProcedure;
@@ -337,7 +399,7 @@ static LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wparam
             const auto previousDraft=draftVisibilityHotkey;
             auto binding=visibilityHotkey;
             if (!hotkeyInput.recording && worldVisible && nativeHotkeyTest && (message==WM_KEYDOWN || message==WM_SYSKEYDOWN) && wparam==binding.key && nativeHotkeyTest(binding.key,binding.modifiers,true)!=AddonHotkeyState::Available) binding={0,0};
-            const auto shortcut=hotkeyInput.Message(message,wparam,lparam,worldVisible,HotkeyBinding::Modifiers(),binding,draftVisibilityHotkey);
+            const auto shortcut=hotkeyInput.Message(message,wparam,lparam,worldVisible && !moveEditing,HotkeyBinding::Modifiers(),binding,draftVisibilityHotkey);
             consume=shortcut!=HotkeyEvent::Pass;
             if (shortcut==HotkeyEvent::Toggle) {
                 EndPanelResize(); panelOptionsOpen=false; visible=!visible; dragging=false;
@@ -350,6 +412,22 @@ static LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wparam
             } else if (shortcut==HotkeyEvent::Cancelled || message==WM_KILLFOCUS) hotkeyMessage.clear();
         }
         if (context && !shuttingDown && worldVisible && !consume) {
+            Ui::SetCurrentContext(context);
+            if (bankFrame.busy) {
+                if ((message == WM_KEYDOWN || message == WM_KEYUP) && wparam == VK_ESCAPE) { bankAction = 3; consumeEscapeUp = false; nativeBankClose = true; }
+                else if (message == WM_KEYDOWN || message == WM_KEYUP || message == WM_CHAR) consume = true;
+                else if (message >= WM_MOUSEFIRST && message <= WM_MOUSELAST) {
+                    POINT point{GET_X_LPARAM(lparam),GET_Y_LPARAM(lparam)};
+                    const auto display = Ui::GetIO().DisplaySize;
+                    const bool closeMouse = message == WM_MOUSEMOVE || message == WM_LBUTTONDOWN || message == WM_LBUTTONUP;
+                    nativeBankClose = closeMouse && bankInputTest && display.x > 0 && display.y > 0 && bankInputTest(point.x/display.x,point.y/display.y,true);
+                    if (!nativeBankClose) { if (message == WM_MOUSEMOVE || PtInRect(&bankArea,point)) Ui::Message(window,message,wparam,lparam); consume = true; }
+                }
+                if (nativeBankClose) { Ui::ClearInput(); dragging = false; }
+                if (message == WM_KILLFOCUS) bankAction = 3;
+            }
+        }
+        if (context && !shuttingDown && worldVisible && !consume && !nativeBankClose) {
             Ui::SetCurrentContext(context);
             if (message == WM_KEYDOWN && wparam == VK_ESCAPE && (panelOptionsOpen || addonsOpen || reportOpen || historyOpen || (visible && selectedCharacter) || consumeEscapeUp)) {
                 if (!(lparam & (1LL << 30)) && !consumeEscapeUp) {
@@ -381,13 +459,14 @@ static LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wparam
                 if (dismissOptions) { panelOptionsOpen = false; dragging = true; Ui::ClearInput(); }
                 const bool inside = allowed && MouseInside(position);
                 if (down && inside) dragging = true;
-                consume = mouse && allowed && (reportOpen || inside || dragging);
+                consume = mouse && allowed && (moveEditing || reportOpen || inside || dragging);
+                if (moveEditing && (message == WM_KEYDOWN || message == WM_KEYUP || message == WM_CHAR)) consume = true;
                 if (consume && (down || up))
                     Ui::GetIO().AddMousePosEvent(static_cast<float>(GET_X_LPARAM(position)), static_cast<float>(GET_Y_LPARAM(position)));
                 if (!dismissOptions && (consume || message == WM_MOUSEMOVE || message == WM_MOUSELEAVE || message == WM_KILLFOCUS || message == WM_SETFOCUS))
                     Ui::Message(window, message, wparam, lparam);
                 if (up) dragging = false;
-                if (message == WM_KILLFOCUS || message == WM_CAPTURECHANGED) { dragging = false; EndPanelResize(); }
+                if (message == WM_KILLFOCUS || message == WM_CAPTURECHANGED) { dragging = false; moveSelected = -1; EndPanelResize(); }
                 if (message == WM_KILLFOCUS) panelOptionsOpen = false;
             }
         }
@@ -1147,6 +1226,7 @@ static void DrawHistory() {
 
 static void BackFromAddons() {
     hotkeyInput.recording=false;
+    if (moveEditing) { moveEditing = false; moveSelected = -1; draftMoveOptions = moveOptions; }
     if (activeAddon && std::strcmp(activeAddon->id,"nameplates") == 0 && nameplatePage) {
         draftNameplateOptions = nameplatePageOptions;
         nameplatePage = 0;
@@ -1407,6 +1487,211 @@ static void DrawCharacterSheetSettings(UiPoint origin,UiPoint scale) {
         else characterSheetMessage = "Settings could not be saved.";
     }
     if (DrawSkinControl("Back",point(185,232),scale,&cancelRect)) activeAddon = nullptr;
+}
+
+static void OpenCursorSettings() { draftCursorOptions = cursorOptions; cursorMessage.clear(); }
+
+static void OpenBankSettings() { draftBankEnabled = bankEnabled; bankMessage.clear(); }
+
+static void OpenMoveSettings() { draftMoveOptions = moveOptions; moveMessage.clear(); moveEditing = true; moveSelected = -1; }
+
+static void DrawMoveSettings(UiPoint,UiPoint) {}
+
+static MoveRect EditorMoveRect(unsigned panel) {
+    auto rect = moveFrame.natural[panel].Valid() ? moveFrame.natural[panel] : moveFrame.panels[panel];
+    const float width = logicalUiSize.x, height = logicalUiSize.y;
+    if (!rect.Valid()) {
+        const MoveRect fallback[] = {{12,12,195,63},{8,98,150,120},{width*0.5f-70,14,140,25},{5,height-300,390,210},{width-208,8,200,200}};
+        rect = fallback[panel];
+    }
+    return draftMoveOptions.enabled ? ResolveMoveRect(panel,draftMoveOptions.panels[panel],rect,width,height) : rect;
+}
+
+static void DrawMoveOutline(UiDrawList* draw,UiPoint origin,UiPoint size,float scale,bool active) {
+    static constexpr UiColor colors[] = {0xffff6767,0xffffbc53,0xffeeed63,0xff70e477,0xff64e5e7,0xff719aff,0xffbb7dff,0xffff79cf};
+    const UiPoint points[] = {{origin.x,origin.y},{origin.x+size.x/2,origin.y},{origin.x+size.x,origin.y},{origin.x+size.x,origin.y+size.y/2},
+        {origin.x+size.x,origin.y+size.y},{origin.x+size.x/2,origin.y+size.y},{origin.x,origin.y+size.y},{origin.x,origin.y+size.y/2}};
+    for (unsigned i = 0; i < 8; ++i) for (unsigned step = 0; step < 8; ++step) {
+        const auto from = colors[i], to = colors[(i+1)%8];
+        const auto channel = [from,to,step](unsigned shift) { return (((from>>shift)&255)*(8-step)+((to>>shift)&255)*step)/8; };
+        const auto& a = points[i]; const auto& b = points[(i+1)%8];
+        const UiPoint first(a.x+(b.x-a.x)*step/8,a.y+(b.y-a.y)*step/8),last(a.x+(b.x-a.x)*(step+1)/8,a.y+(b.y-a.y)*(step+1)/8);
+        draw->AddLine(first,last,UI_COLOR(channel(16),channel(8),channel(0),active ? 105 : 60),7*scale);
+        draw->AddLine(first,last,UI_COLOR(channel(16),channel(8),channel(0),255),2*scale);
+    }
+}
+
+static void DrawMoveEditor() {
+    if (!moveEditing || !addonsOpen || !worldVisible || !nativeSkin.Ready() || logicalUiSize.x < 320 || logicalUiSize.y < 200) return;
+    const auto display = Ui::GetIO().DisplaySize, scale = GameScale();
+    const auto toolbarScale = FitScale(scale,UiPoint(480,132));
+    const UiPoint size(480*toolbarScale.x,132*toolbarScale.y), origin((display.x-size.x)*0.5f,std::max(0.0f,display.y-size.y-12*toolbarScale.y));
+    Ui::SetNextWindowPos(UiPoint(0,0)); Ui::SetNextWindowSize(display);
+    if (Ui::Begin("##Moveeverything",nullptr,SurfaceFlags | Ui::NoSavedSettings)) {
+        auto* draw = Ui::GetWindowDrawList();
+        RegisterHitArea();
+        moveToolbar = Rectangle(origin,size);
+        nativeSkin.Frame(draw,origin,size,toolbarScale);
+        Heading(draw,"Moveeverything",At(origin,toolbarScale,20,12),toolbarScale,310);
+        if (SkinControl("MoveToggle",draftMoveOptions.enabled ? "On" : "Off",At(origin,toolbarScale,365,8),UiPoint(95*toolbarScale.x,29*toolbarScale.y),toolbarScale,&moveToggle)) draftMoveOptions.enabled = !draftMoveOptions.enabled;
+        BodyText(draw,"Drag the highlighted panels. Drag a corner to resize.",At(origin,toolbarScale,20,41),UiPoint(toolbarScale.x*.86f,toolbarScale.y*.86f),BodyColor,440*toolbarScale.x);
+        if (SkinControl("MoveOkay","Okay",At(origin,toolbarScale,18,78),UiPoint(141*toolbarScale.x,34*toolbarScale.y),toolbarScale,&moveOkay)) {
+            if (SaveMoveSettings()) { moveOptions = draftMoveOptions; moveEditing = false; moveSelected = -1; activeAddon = nullptr; }
+            else moveMessage = "Settings could not be saved.";
+        }
+        if (SkinControl("MoveReset","Reset",At(origin,toolbarScale,170,78),UiPoint(141*toolbarScale.x,34*toolbarScale.y),toolbarScale,&moveReset)) { draftMoveOptions.panels = {}; moveSelected = -1; }
+        if (SkinControl("MoveBack","Back",At(origin,toolbarScale,321,78),UiPoint(141*toolbarScale.x,34*toolbarScale.y),toolbarScale,&moveBack)) BackFromAddons();
+        if (!moveMessage.empty()) BodyText(draw,moveMessage.c_str(),At(origin,toolbarScale,20,113),UiPoint(toolbarScale.x*.75f,toolbarScale.y*.75f),GoldColor,440*toolbarScale.x);
+        if (moveEditing) {
+            static constexpr const char* names[] = {"Player HP / Mana","Party UI","Target","Chat","Minimap"};
+            auto& io = Ui::GetIO();
+            if (!io.MouseDown[0]) moveSelected = -1;
+            for (unsigned panel = 0; panel < MovePanelCount; ++panel) {
+                Ui::PushID(static_cast<int>(panel));
+                auto rect = EditorMoveRect(panel);
+                if (moveSelected == static_cast<int>(panel) && io.MouseDown[0]) {
+                    const float dx = (io.MousePos.x-moveDragMouse.x)/scale.x, dy = (io.MousePos.y-moveDragMouse.y)/scale.y;
+                    rect = moveDragStart;
+                    if (moveResizing) {
+                        if (panel == unsigned(MovePanel::Minimap)) rect.width = rect.height = moveDragStart.width+std::max(dx,dy);
+                        else if (panel < unsigned(MovePanel::Chat)) {
+                            const float delta = std::abs(dx/moveDragStart.width) >= std::abs(dy/moveDragStart.height) ? dx/moveDragStart.width : dy/moveDragStart.height;
+                            rect.width *= std::max(.1f,1+delta); rect.height *= std::max(.1f,1+delta);
+                            rect = FitMoveAspect(panel,rect,moveDragStart,logicalUiSize.x,logicalUiSize.y);
+                        } else { rect.width += dx; rect.height += dy; }
+                        rect.width = std::max(1.0f,rect.width); rect.height = std::max(1.0f,rect.height);
+                    } else { rect.x += dx; rect.y += dy; }
+                    rect = ClampMoveRect(panel,rect,logicalUiSize.x,logicalUiSize.y);
+                    draftMoveOptions.panels[panel] = StoreMoveRect(panel,rect,logicalUiSize.x,logicalUiSize.y);
+                }
+                const UiPoint a(rect.x*scale.x,rect.y*scale.y), extent(rect.width*scale.x,rect.height*scale.y), b(a.x+extent.x,a.y+extent.y);
+                draw->AddRectFilled(a,b,UI_COLOR(0,0,0,moveFrame.visible[panel] ? 22 : 80));
+                DrawMoveOutline(draw,a,extent,scale.y,moveSelected == static_cast<int>(panel));
+                const auto title = std::string(names[panel])+(moveFrame.visible[panel] ? "" : " (not visible)");
+                const UiPoint label(a.x+5*scale.x,std::max(0.0f,a.y-20*scale.y));
+                const auto labelSize = valueFont->CalcTextSizeA(13*scale.y,FLT_MAX,0,title.c_str());
+                draw->AddRectFilled(label,UiPoint(std::min(display.x,label.x+labelSize.x+8*scale.x),label.y+19*scale.y),UI_COLOR(0,0,0,215));
+                BodyText(draw,title.c_str(),At(label,scale,4,1),UiPoint(scale.x*.9f,scale.y*.9f),BodyColor);
+                const POINT mouse{static_cast<LONG>(io.MousePos.x),static_cast<LONG>(io.MousePos.y)};
+                Ui::BeginDisabled(!draftMoveOptions.enabled || PtInRect(&moveToolbar,mouse));
+                if (MoveResizable(panel)) {
+                    const UiPoint handle(b.x-18*scale.x,b.y-18*scale.y);
+                    Ui::SetCursorScreenPos(handle); Ui::InvisibleButton("Resize",UiPoint(18*scale.x,18*scale.y));
+                    if (Ui::IsItemActivated()) { moveSelected = static_cast<int>(panel); moveResizing = true; moveDragStart = rect; moveDragMouse = io.MousePos; }
+                    draw->AddRectFilled(handle,b,UI_COLOR(0,0,0,180));
+                    for (unsigned j = 0; j < 3; ++j) draw->AddLine(UiPoint(b.x-(5+j*4)*scale.x,b.y-3*scale.y),UiPoint(b.x-3*scale.x,b.y-(5+j*4)*scale.y),UI_WHITE,scale.y);
+                }
+                Ui::SetCursorScreenPos(a); Ui::InvisibleButton("Move",extent);
+                if (Ui::IsItemActivated()) { moveSelected = static_cast<int>(panel); moveResizing = false; moveDragStart = rect; moveDragMouse = io.MousePos; }
+                Ui::EndDisabled(); Ui::PopID();
+            }
+        }
+    }
+    Ui::End();
+}
+
+static void DrawBankSettings(UiPoint origin,UiPoint scale) {
+    auto point = [origin,scale](float x,float y) { return At(origin,scale,x,y); };
+    auto* draw = Ui::GetWindowDrawList();
+    Heading(draw,"Sort Bank Pages",point(34,20),scale,280);
+    if (OptionRow("Bank sort:",draftBankEnabled ? "On" : "Off",point(10,58),scale,"Shows sorting buttons while the bank is open.",point(355,58),origin.x)) draftBankEnabled = !draftBankEnabled;
+    BodyText(draw,"Sort Page: current page. Sort Pages: all accessible pages. Groups rings, weapons and matching armor icons.",point(34,106),scale,BodyColor,282 * scale.x);
+    if (!bankMessage.empty()) BodyText(draw,bankMessage.c_str(),point(34,195),scale,GoldColor,282 * scale.x);
+    if (DrawSkinControl("Okay",point(24,232),scale,&okayRect)) {
+        if (SaveBankSettings()) { bankEnabled = draftBankEnabled; activeAddon = nullptr; }
+        else bankMessage = "Settings could not be saved.";
+    }
+    if (DrawSkinControl("Back",point(185,232),scale,&cancelRect)) activeAddon = nullptr;
+}
+
+static void DrawBankSort() {
+    static std::string lastMessage;
+    static uint64_t messageUntil = 0;
+    bankArea = {};
+    if (!addonRegistry.BankSort() || (!bankEnabled && !bankFrame.busy) || !bankFrame.visible || addonsOpen || reportOpen) { lastMessage.clear(); messageUntil = 0; return; }
+    if (lastMessage != bankFrame.message) {
+        lastMessage = bankFrame.message;
+        messageUntil = !lastMessage.empty() && !bankFrame.busy ? GetTickCount64()+8000 : 0;
+    }
+    const auto scale = GameScale();
+    const float width = bankFrame.width, height = bankFrame.height;
+    const UiPoint size(width*scale.x,height*scale.y);
+    const UiPoint origin(bankFrame.x*scale.x,bankFrame.y*scale.y);
+    Ui::SetNextWindowPos(origin); Ui::SetNextWindowSize(size);
+    if (Ui::Begin("##BankSort",nullptr,SurfaceFlags | Ui::NoSavedSettings)) {
+        RegisterHitArea(); bankArea = Rectangle(origin,size);
+        const auto button = [&](const char* id,const char* label,float x,float buttonWidth) {
+            const auto position = At(origin,scale,x,0);
+            const UiPoint extent(buttonWidth*scale.x,height*scale.y);
+            Ui::SetCursorScreenPos(position);
+            const bool clicked = Ui::InvisibleButton(id,extent);
+            nativeSkin.CompactButton(Ui::GetWindowDrawList(),position,extent,scale,Ui::IsItemHovered(),Ui::IsItemActive(),label);
+            return clicked;
+        };
+        if (bankFrame.busy) {
+            const auto progress = bankFrame.total ? "Sorting " + std::to_string(bankFrame.completed) + " / " + std::to_string(bankFrame.total) : std::string("Planning...");
+            BodyText(Ui::GetWindowDrawList(),progress.c_str(),At(origin,scale,2,3),UiPoint(scale.x*.85f,scale.y*.85f));
+            if (button("CancelSort","Cancel",width-108,108)) bankAction = 3;
+        } else {
+            Ui::BeginDisabled(!bankFrame.available);
+            const float half = (width-8)*.5f;
+            if (button("SortPage","Sort Page",0,half)) bankAction = 1;
+            if (button("SortPages","Sort Pages",half+8,half)) bankAction = 2;
+            Ui::EndDisabled();
+        }
+        const auto* status = bankFrame.message.empty() ? "Sort Page: current page. Sort Pages: fill from Page 1. Groups by item type and appearance." : bankFrame.message.c_str();
+        if (Ui::IsWindowHovered() || GetTickCount64() < messageUntil) QueueHelp(status,At(origin,scale,width+5,0),scale,origin.x,true);
+    }
+    Ui::End();
+}
+
+static const char* CursorColorNames[] = {"Red","Yellow","White","Green","Cyan","Blue","Purple","Pink"};
+static const UiColor CursorColors[] = {UI_COLOR(255,32,32,255),UI_COLOR(255,220,32,255),UI_COLOR(255,255,255,255),UI_COLOR(64,255,64,255),UI_COLOR(32,230,255,255),UI_COLOR(80,128,255,255),UI_COLOR(180,80,255,255),UI_COLOR(255,80,180,255)};
+
+static void DrawCursorRing(UiPoint center,float radius,float scale,UiColor color) {
+    auto* draw = Ui::GetForegroundDrawList();
+    for (unsigned pass = 0; pass < 2; ++pass) {
+        const float width = (pass ? 2.2f : 4.5f) * scale;
+        UiPoint previous(center.x + radius,center.y);
+        for (unsigned i = 1; i <= 64; ++i) {
+            const float angle = i * 6.28318530718f / 64;
+            const UiPoint next(center.x + std::cos(angle) * radius,center.y + std::sin(angle) * radius);
+            draw->AddLine(previous,next,pass ? color : UI_COLOR(0,0,0,220),width);
+            previous = next;
+        }
+    }
+}
+
+static void DrawCursorSettings(UiPoint origin,UiPoint scale) {
+    auto point = [origin,scale](float x,float y) { return At(origin,scale,x,y); };
+    auto* draw = Ui::GetWindowDrawList();
+    Heading(draw,"Cursor Circle",point(34,20),scale,280);
+    if (OptionRow("Cursor circle:",draftCursorOptions.enabled ? "On" : "Off",point(10,58),scale,"Highlights the cursor during your combat, including your pet. Works independently of Damage Meter.",point(355,58),origin.x)) draftCursorOptions.enabled = !draftCursorOptions.enabled;
+    const auto size = std::to_string(draftCursorOptions.radius);
+    const int step = OptionRow("Ring size:",size.c_str(),point(10,96),scale,"Radius in game UI pixels.",point(355,96),origin.x);
+    if (step) draftCursorOptions.radius = static_cast<unsigned>(std::clamp(static_cast<int>(draftCursorOptions.radius) + step * 2,12,40));
+    const int shade = OptionRow("Color:",CursorColorNames[draftCursorOptions.color],point(10,134),scale,"Ring color.",point(355,134),origin.x);
+    if (shade) draftCursorOptions.color = (draftCursorOptions.color + (shade > 0 ? 1 : 7)) % 8;
+    DrawCursorRing(point(75,214),draftCursorOptions.radius * scale.y,scale.y,CursorColors[draftCursorOptions.color]);
+    BodyText(draw,"Hides after 10 seconds without damage dealt or received.",point(130,183),UiPoint(scale.x*.85f,scale.y*.85f),BodyColor,185 * scale.x);
+    if (!cursorMessage.empty()) BodyText(draw,cursorMessage.c_str(),point(34,265),scale,GoldColor,282 * scale.x);
+    if (DrawSkinControl("Okay",point(24,290),scale,&okayRect)) {
+        if (SaveCursorSettings()) { cursorOptions = draftCursorOptions; if (!cursorOptions.enabled) cursorCombatUntil = 0; activeAddon = nullptr; }
+        else cursorMessage = "Settings could not be saved.";
+    }
+    if (DrawSkinControl("Back",point(185,290),scale,&cancelRect)) activeAddon = nullptr;
+}
+
+static void DrawCombatCursor() {
+    if (!addonRegistry.CombatCursor() || !cursorOptions.enabled || !worldVisible || GetTickCount64() >= cursorCombatUntil || !gameWindow || GetForegroundWindow() != gameWindow) return;
+    POINT pointer{};
+    RECT client{};
+    if (!GetCursorPos(&pointer) || !ScreenToClient(gameWindow,&pointer) || !GetClientRect(gameWindow,&client) || !PtInRect(&client,pointer) || client.right <= 0 || client.bottom <= 0) return;
+    const auto display = Ui::GetIO().DisplaySize;
+    const UiPoint center(pointer.x * display.x / client.right,pointer.y * display.y / client.bottom);
+    const float scale = GameScale().y;
+    const float radius = cursorOptions.radius * scale;
+    DrawCursorRing(center,radius,scale,CursorColors[cursorOptions.color]);
 }
 
 static void DrawCharacterSheet() {
@@ -1745,7 +2030,9 @@ static void DrawAdvancedSettings(UiPoint origin,UiPoint scale) {
         for (unsigned i=0;i<settings.optionCount;++i) extensionDraft[i]=settings.options[i].initial;
         extensionMessage.clear();
     }
-    const char* message=extensionMessage.empty() ? "Okay saves and applies all pages immediately." : extensionMessage.c_str();
+    char status[192]{};
+    const bool hasStatus=activeAddon->extension && addonRegistry.Status(*activeAddon->extension,status,sizeof(status));
+    const char* message=extensionMessage.empty() ? (hasStatus ? status : "Okay saves and applies all pages immediately.") : extensionMessage.c_str();
     Ui::GetWindowDrawList()->PushClipRect(point(24,415),point(326,447));
     BodyText(Ui::GetWindowDrawList(),message,point(24,415),scale,extensionMessage.empty() ? BodyColor : GoldColor,302*scale.x);
     Ui::GetWindowDrawList()->PopClipRect();
@@ -1786,6 +2073,9 @@ static void DiscoverAddons(const std::filesystem::path& root) {
     if (addonRegistry.CharacterSheet()) registeredAddons.push_back({"better-character-sheet","Better Character Sheet","Shows Weapon Crit, Magic Crit, Stun Resist and Movement.",OpenCharacterSheetSettings,DrawCharacterSheetSettings,nullptr});
     if (addonRegistry.MythicSounds()) registeredAddons.push_back({"mythic-drop-sounds","Mythic Drop Sounds","Sound and chat alerts for Mythic drops.",OpenMythicSettings,DrawMythicSettings,nullptr});
     if (addonRegistry.WishingWell()) registeredAddons.push_back({"wishing-well-tracker","Wishing Well Tracker","Cooldown and login reminders with separate sounds.",OpenWellSettings,DrawWellSettings,nullptr});
+    if (addonRegistry.CombatCursor()) registeredAddons.push_back({"cursor-circle","Cursor Circle","Highlights the cursor during combat.",OpenCursorSettings,DrawCursorSettings,nullptr});
+    if (addonRegistry.BankSort()) registeredAddons.push_back({"sort-bank-pages","Sort Bank Pages","Sort one bank page or all accessible pages.",OpenBankSettings,DrawBankSettings,nullptr});
+    if (addonRegistry.MoveEverything()) registeredAddons.push_back({"moveeverything","Moveeverything","Move player, party, target, chat and minimap panels.",OpenMoveSettings,DrawMoveSettings,nullptr});
     for (const auto& extension:addonRegistry.Extensions()) registeredAddons.push_back({extension.id,extension.name,extension.description,OpenExtensionSettings,DrawExtensionSettings,&extension,addonRegistry.Settings(extension)});
 }
 
@@ -1813,6 +2103,7 @@ static void DrawLibrary(UiPoint origin,UiPoint scale,float listHeight) {
 }
 
 static void DrawAddons() {
+    if (moveEditing) return;
     const UiPoint display = Ui::GetIO().DisplaySize;
     if (menuBounds[2]<=0 || menuBounds[3]<=0 || !nativeSkin.Ready()) return;
     const UiPoint position(menuBounds[0]*display.x,menuBounds[1]*display.y);
@@ -1830,7 +2121,7 @@ static void DrawAddons() {
     }
     if (addonsOpen) {
         const float listHeight = std::clamp(static_cast<float>(registeredAddons.size())*48,48.0f,192.0f);
-        const float height = activeAddon ? (activeAddon->advanced ? 506.0f : activeAddon->open == OpenWellSettings ? 518.0f : activeAddon->open == OpenDamageSettings ? 390.0f : activeAddon->open == OpenNameplateSettings && !nameplatePage ? 340.0f : activeAddon->open == OpenMythicSettings ? 365.0f : 289.0f) : 125+listHeight;
+        const float height = activeAddon ? (activeAddon->advanced ? 506.0f : activeAddon->open == OpenWellSettings ? 518.0f : activeAddon->open == OpenDamageSettings ? 390.0f : activeAddon->open == OpenNameplateSettings && !nameplatePage ? 340.0f : activeAddon->open == OpenMythicSettings ? 365.0f : activeAddon->open == OpenCursorSettings ? 347.0f : 289.0f) : 125+listHeight;
         const UiPoint scale = FitScale(buttonScale,UiPoint(350,height));
         const UiPoint panelSize(350 * scale.x,height * scale.y);
         const UiPoint origin(std::floor((display.x-panelSize.x)*0.5f),std::floor((display.y-panelSize.y)*0.5f));
@@ -1857,6 +2148,15 @@ extern "C" __declspec(dllexport) int __cdecl MeterOverlayStart(const char* iniFi
     const auto addonsDirectory=std::filesystem::u8path(settingsFile).parent_path().parent_path();
     if (!LoadSkinData(addonsDirectory/L"Runtime"/L"ui.bin")) return 0;
     DiscoverAddons(addonsDirectory);
+    cursorSettings = addonsDirectory / L"CursorCircle" / L"settings.ini";
+    cursorOptions = {}; cursorCombatUntil = 0;
+    { std::ifstream input(cursorSettings); cursorOptions.Load(input); }
+    bankSettings = addonsDirectory / L"SortBankPages" / L"settings.ini";
+    bankEnabled = true; bankFrame = {}; bankAction = 0; bankArea = {};
+    { unsigned value = 1; std::ifstream input(bankSettings); if (input >> value && value <= 1) bankEnabled = value != 0; }
+    moveSettings = addonsDirectory / L"Moveeverything" / L"settings.ini";
+    moveOptions = {}; moveFrame = {}; moveEditing = false; moveSelected = -1;
+    { std::ifstream input(moveSettings); moveOptions.Load(input); }
     mythicSettings = addonsDirectory / L"MythicDropSounds" / L"settings.ini";
     mythicOptions = {}; mythicPreview = -1; mythicFailed = false;
     mythicBrowse = false; mythicCustomStatus = CustomSoundStatus::None;
@@ -1963,6 +2263,7 @@ extern "C" __declspec(dllexport) void __cdecl MeterOverlayMenu(float x, float y,
         x < 0 || y < 0 || width <= 0 || height <= 0 || x + width > 1 || y + height > 1) {
         std::fill(std::begin(menuBounds), std::end(menuBounds), 0.0f);
         addonsOpen = false;
+        moveEditing = false; moveSelected = -1;
         activeAddon = nullptr;
         addonsButtonRect = {};
         return;
@@ -2029,6 +2330,7 @@ extern "C" void __cdecl MeterOverlayLayer(IDirect3DDevice9* device,AddonUiLayer 
         DrawHelp();
     } else if (layer == AddonUiLayer::Menu) { help.text.clear(); DrawAddons(); DrawHelp(); }
     else if (layer == AddonUiLayer::CharacterSheet) DrawCharacterSheet();
+    else if (layer == AddonUiLayer::Bank) { help.text.clear(); DrawBankSort(); DrawHelp(); }
     else DrawCooldowns(now,layer);
     Ui::Flush();
     Ui::SetInputEnabled(true);
@@ -2036,7 +2338,16 @@ extern "C" void __cdecl MeterOverlayLayer(IDirect3DDevice9* device,AddonUiLayer 
 
 extern "C" void __cdecl MeterOverlayEndFrame() {
     Lock lock;
-    if (context && nativeFrame) { Ui::SetCurrentContext(context); Ui::EndFrame(); InterlockedIncrement(&frames); }
+    if (context && nativeFrame) {
+        Ui::SetCurrentContext(context);
+        if (graphics && worldVisible && (moveEditing || (cursorOptions.enabled && GetTickCount64() < cursorCombatUntil)) && SUCCEEDED(graphics->TestCooperativeLevel()) && SUCCEEDED(graphics->BeginScene())) {
+            DrawMoveEditor();
+            DrawCombatCursor();
+            Ui::Flush();
+            graphics->EndScene();
+        }
+        Ui::EndFrame(); InterlockedIncrement(&frames);
+    }
     nativeFrame = false;
 }
 
@@ -2047,9 +2358,27 @@ extern "C" __declspec(dllexport) void __cdecl MeterOverlayRender(IDirect3DDevice
     Lock lock;
     if (shuttingDown) { ShutdownUnlocked(); InterlockedExchange(&stopped,1); return; }
     if (!device || !worldVisible || FAILED(device->BeginScene())) return;
-    for (auto layer : {AddonUiLayer::Meter,AddonUiLayer::Hotbar,AddonUiLayer::Effects,AddonUiLayer::CharacterSheet,AddonUiLayer::Menu}) MeterOverlayLayer(device,layer);
-    MeterOverlayEndFrame();
+    for (auto layer : {AddonUiLayer::Meter,AddonUiLayer::Hotbar,AddonUiLayer::Effects,AddonUiLayer::CharacterSheet,AddonUiLayer::Bank,AddonUiLayer::Menu}) MeterOverlayLayer(device,layer);
     device->EndScene();
+    MeterOverlayEndFrame();
+}
+
+extern "C" bool __cdecl MeterOverlayCursorEnabled() { Lock lock; return addonRegistry.CombatCursor() && cursorOptions.enabled; }
+extern "C" void __cdecl MeterOverlayCursorCombat(uint64_t until) { Lock lock; cursorCombatUntil = until; }
+
+extern "C" bool __cdecl MeterOverlayBankSettings(const BankSortFrame* value,unsigned* action,bool* focused) {
+    Lock lock;
+    if (value) bankFrame = *value;
+    if (action) { *action = bankAction; bankAction = 0; }
+    if (focused) *focused = gameWindow && GetForegroundWindow() == gameWindow && !addonsOpen && !reportOpen;
+    return addonRegistry.BankSort() && bankEnabled;
+}
+
+extern "C" bool __cdecl MeterOverlayMoveSettings(MoveLayoutSettings* settings,const MoveLayoutFrame* value) {
+    Lock lock;
+    if (value) moveFrame = *value;
+    if (settings) *settings = moveEditing ? draftMoveOptions : moveOptions;
+    return addonRegistry.MoveEverything();
 }
 
 extern "C" bool __cdecl MeterOverlayAddonsOpen() {
@@ -2059,6 +2388,7 @@ extern "C" bool __cdecl MeterOverlayAddonsOpen() {
 
 extern "C" bool __cdecl MeterOverlayHideGold() { Lock lock; return addonRegistry.Money() && goldHidden; }
 extern "C" void __cdecl MeterOverlayCharacterInputTest(AddonInputTest test) { Lock lock; characterInputTest = test; }
+extern "C" void __cdecl MeterOverlayBankInputTest(AddonInputTest test) { Lock lock; bankInputTest = test; }
 extern "C" bool __cdecl MeterOverlayCharacterSheetEnabled() { Lock lock; return addonRegistry.CharacterSheet() && characterSheetEnabled; }
 extern "C" void __cdecl MeterOverlayCharacterSheet(const CharacterSheetFrame* input) {
     Lock lock;
@@ -2171,6 +2501,7 @@ extern "C" __declspec(dllexport) void __cdecl MeterOverlayWorld(bool shown) {
         hotkeyInput.recording=false; hotkeyMessage.clear();
         EndPanelResize(); hitCount = 0; dragging = false; wellTimerArea = {};
         addonsOpen = historyOpen = panelOptionsOpen = false;
+        moveEditing = false; moveSelected = -1; moveFrame = {};
         activeAddon = nullptr; addonsButtonRect = {}; consumeEscapeUp = false;
         selectedCharacter = 0; selectedPet = 0;
         reportOpen = reportPending = false; reportPreview = reportRequest = {};

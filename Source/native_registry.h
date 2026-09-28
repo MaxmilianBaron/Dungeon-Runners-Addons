@@ -9,7 +9,8 @@
 class AddonRegistry {
     std::vector<ExtensionDefinition> extensions;
     std::vector<ExtensionSettings> settings;
-    bool damage = false, money = false, cooldowns = false, nameplates = false, characterSheet = false, mythicSounds = false, wishingWell = false;
+    std::vector<ExtensionGetStatus> statuses;
+    bool damage = false, money = false, cooldowns = false, nameplates = false, characterSheet = false, mythicSounds = false, wishingWell = false, combatCursor = false, bankSort = false, moveEverything = false;
     unsigned rejected = 0;
 
     static bool Plain(const char* value,size_t size) {
@@ -65,7 +66,7 @@ public:
         return true;
     }
     void Discover(const std::filesystem::path& root) {
-        extensions.clear(); settings.clear(); damage=money=cooldowns=nameplates=characterSheet=mythicSounds=wishingWell=false; rejected=0;
+        extensions.clear(); settings.clear(); statuses.clear(); damage=money=cooldowns=nameplates=characterSheet=mythicSounds=wishingWell=combatCursor=bankSort=moveEverything=false; rejected=0;
         std::error_code error;
         if (!Regular(root,true)) return;
         std::vector<std::filesystem::path> directories;
@@ -86,9 +87,12 @@ public:
             if (builtin=="BetterCharacterSheet" && id=="better-character-sheet") { characterSheet=true; continue; }
             if (builtin=="MythicDropSounds" && id=="mythic-drop-sounds") { mythicSounds=true; continue; }
             if (builtin=="WishingWellTracker" && id=="wishing-well-tracker") { wishingWell=true; continue; }
+            if (builtin=="CursorCircle" && id=="cursor-circle") { combatCursor=true; continue; }
+            if (builtin=="SortBankPages" && id=="sort-bank-pages") { bankSort=true; continue; }
+            if (builtin=="Moveeverything" && id=="moveeverything") { moveEverything=true; continue; }
             if (builtin=="Nameplates" && id=="nameplates") { nameplates=true; continue; }
             if ((builtin=="HideGoldLabels" && id=="hide-gold-labels") || (builtin=="HideMoneyBoxes" && id=="hide-money-boxes")) { money=true; continue; }
-            if (!builtin.empty() || id=="damage-meter" || id=="hide-gold-labels" || id=="hide-money-boxes" || id=="cooldown-timers" || id=="nameplates" || id=="better-character-sheet" || id=="mythic-drop-sounds" || id=="wishing-well-tracker") { ++rejected; continue; }
+            if (!builtin.empty() || id=="damage-meter" || id=="hide-gold-labels" || id=="hide-money-boxes" || id=="cooldown-timers" || id=="nameplates" || id=="better-character-sheet" || id=="mythic-drop-sounds" || id=="wishing-well-tracker" || id=="cursor-circle" || id=="sort-bank-pages" || id=="moveeverything") { ++rejected; continue; }
             const auto modulePath=directory/L"Addon.dll";
             if (!Regular(modulePath)) { ++rejected; continue; }
             const auto module=LoadLibraryExW(modulePath.c_str(),nullptr,LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR|LOAD_LIBRARY_SEARCH_SYSTEM32);
@@ -108,7 +112,7 @@ public:
                 advanced.size=sizeof(advanced); advanced.version=ExtensionSettingsVersion;
                 valid=InitializeSettings(getSettings,&advanced) && ValidSettings(advanced);
             }
-            if (valid) { extensions.push_back(result); settings.push_back(advanced); }
+            if (valid) { extensions.push_back(result); settings.push_back(advanced); statuses.push_back(reinterpret_cast<ExtensionGetStatus>(GetProcAddress(module,"DungeonRunnersAddonGetStatus"))); }
             else ++rejected;
         }
     }
@@ -118,9 +122,24 @@ public:
     bool CharacterSheet() const { return characterSheet; }
     bool MythicSounds() const { return mythicSounds; }
     bool WishingWell() const { return wishingWell; }
+    bool CombatCursor() const { return combatCursor; }
+    bool BankSort() const { return bankSort; }
+    bool MoveEverything() const { return moveEverything; }
     bool Nameplates() const { return nameplates; }
     unsigned Rejected() const { return rejected; }
     const std::vector<ExtensionDefinition>& Extensions() const { return extensions; }
+    bool Status(const ExtensionDefinition& item,char* text,uint32_t capacity) const {
+        if (!text || capacity < 2) return false;
+        text[0] = 0;
+        for (size_t i = 0; i < extensions.size(); ++i) if (&extensions[i] == &item && statuses[i]) {
+            __try {
+                const bool ok = statuses[i](text,capacity) != FALSE;
+                text[capacity-1] = 0;
+                return ok && Plain(text,capacity);
+            } __except (EXCEPTION_EXECUTE_HANDLER) { text[0] = 0; return false; }
+        }
+        return false;
+    }
     const ExtensionSettings* Settings(const ExtensionDefinition& item) const {
         for (size_t i=0;i<extensions.size();++i) if (&extensions[i]==&item) return settings[i].size ? &settings[i] : nullptr;
         return nullptr;

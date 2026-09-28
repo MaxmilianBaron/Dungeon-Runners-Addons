@@ -196,6 +196,14 @@ public:
         if (!fallback.empty()) return {fallback, fallback};
         return {"unattributed", "Unattributed effect"};
     }
+    bool LocalAvatarAlive() const {
+        const auto ui = Pointer(image + 0x5314b0);
+        const auto player = Pointer(Pointer(ui + 0x1b4) + 0xf8);
+        const auto avatar = Pointer(player + 0xb0);
+        int32_t hp = 0;
+        return player && Pointer(player) == image + 0x49b468 && avatar && Pointer(avatar) == image + 0x46de00 &&
+            Pointer(avatar + 0x14) == player && Read(avatar + 0x2f0,hp) && hp > 0;
+    }
     bool Party(uint32_t& selfId, std::vector<MeterMember>& members) const {
         const uintptr_t ui = Pointer(image + 0x5314b0);
         const uintptr_t zone = ui ? Pointer(ui + 0x1b4) : 0;

@@ -19,6 +19,10 @@
 #include "native_history.h"
 #include "addon_api.h"
 #include "native_catalog.generated.h"
+#include "combat_cursor.h"
+#include "native_bank_sort.h"
+#include "native_move_layout.h"
+#include "move_projection.h"
 
 extern "C" int __cdecl MeterOverlayStart(const char*);
 extern "C" int __cdecl MeterOverlayUpdate(const void*, unsigned);
@@ -47,6 +51,11 @@ extern "C" void __cdecl MeterOverlayCharacterSheet(const CharacterSheetFrame*);
 extern "C" void __cdecl MeterOverlayCharacterInputTest(AddonInputTest);
 extern "C" int __cdecl MeterOverlayMythicSettings(MythicSettings*,bool,unsigned*,HWND*,CustomSoundStatus,bool);
 extern "C" bool __cdecl MeterOverlayWellSettings(WellSettings*,WellUiAction*,const WellUiState*);
+extern "C" bool __cdecl MeterOverlayCursorEnabled();
+extern "C" void __cdecl MeterOverlayCursorCombat(uint64_t);
+extern "C" bool __cdecl MeterOverlayBankSettings(const BankSortFrame*,unsigned*,bool*);
+extern "C" bool __cdecl MeterOverlayMoveSettings(MoveLayoutSettings*,const MoveLayoutFrame*);
+extern "C" void __cdecl MeterOverlayBankInputTest(AddonInputTest);
 
 static INIT_ONCE bootstrap = INIT_ONCE_STATIC_INIT;
 static volatile LONG ready = 0;
@@ -54,6 +63,9 @@ static volatile LONG collecting = 0;
 static uintptr_t image = 0;
 static std::recursive_mutex stateGate;
 static NativeMeter meter;
+static CursorCombat cursorCombat;
+static NativeBankSort bankSort;
+static NativeMoveLayout moveLayout;
 static MeterPacket snapshot{};
 static DungeonHistory history;
 static DungeonHistorySnapshot historySnapshot;
@@ -141,6 +153,9 @@ static bool VerifyCatalog(const std::filesystem::path& directory) {
 static void Fault(const char* text) {
     std::lock_guard<std::recursive_mutex> lock(stateGate);
     meter.Fail(text);
+    cursorCombat.Reset();
+    MeterOverlayCursorCombat(0);
+    bankSort.Reset();
     history.Pause(true);
     InterlockedExchange(&collecting, 0);
     nextSnapshot = 0;
@@ -171,6 +186,101 @@ static bool SetSheetGeometry(uintptr_t node,const NativeCharacterSheet::Geometry
         reinterpret_cast<Setter>(image + 0x27fed0)(reinterpret_cast<void*>(node),bounds.data() + 2,false);
         return true;
     } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+
+static bool MovePendingLayout(uintptr_t node) {
+    NativeReader reader(image,CopyMemoryChecked,LookupLabel);
+    const auto function = reader.Pointer(reader.Pointer(node)+0xf8);
+    if (function < image+0x1000 || function >= image+0x430000) return false;
+    using Layout = void (__thiscall*)(void*);
+    __try { reinterpret_cast<Layout>(function)(reinterpret_cast<void*>(node)); return true; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+
+static bool SetMoveGeometry(uintptr_t node,const NativeMoveLayout::Geometry& bounds,unsigned panel,bool resized) {
+    using Setter = void (__thiscall*)(void*,const int32_t*,bool);
+    using Layout = void (__thiscall*)(void*);
+    __try {
+        reinterpret_cast<Setter>(image+0x27fc60)(reinterpret_cast<void*>(node),bounds.data(),false);
+        if (resized) {
+            reinterpret_cast<Setter>(image+0x27fed0)(reinterpret_cast<void*>(node),bounds.data()+2,false);
+        }
+        if (panel == unsigned(MovePanel::Minimap)) reinterpret_cast<Layout>(image+0x53630)(reinterpret_cast<void*>(node));
+        else if (resized && panel == unsigned(MovePanel::Chat)) reinterpret_cast<Layout>(image+0x281d50)(reinterpret_cast<void*>(node));
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+
+static MoveProjection moveProjection;
+using LoadProjection = void (__thiscall*)(void*,unsigned,const float*);
+
+extern "C" void __fastcall MoveProjectionLoad(uintptr_t graphics,uintptr_t,unsigned mode,const float* matrix) {
+    const auto original = reinterpret_cast<LoadProjection>(MoveProjectionOriginal);
+    if (mode != 2 || graphics != MoveProjectionTarget) { original(reinterpret_cast<void*>(graphics),mode,matrix); return; }
+    std::array<float,16> source;
+    if (!CopyMemoryChecked(reinterpret_cast<uintptr_t>(matrix),source.data(),sizeof(source))) { original(reinterpret_cast<void*>(graphics),mode,matrix); return; }
+    const auto projected = moveProjection.Apply(source);
+    original(reinterpret_cast<void*>(graphics),mode,projected.data());
+}
+
+static bool WriteMoveClip(uintptr_t address,const std::array<int32_t,4>& clip) {
+    __try { std::memcpy(reinterpret_cast<void*>(address),clip.data(),sizeof(clip)); return true; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+
+void __fastcall MoveControlDraw(uintptr_t control,uintptr_t function,uintptr_t event) {
+    using Draw = void (__thiscall*)(void*,void*);
+    const auto original = reinterpret_cast<Draw>(function);
+    NativeReader reader(image,CopyMemoryChecked,LookupLabel);
+    NativeMoveLayout::Geometry natural{}, displayed{};
+    std::array<float,16> projection{};
+    std::array<int32_t,4> clip{};
+    std::array<int32_t,2> offset{};
+    const auto graphics = reader.Pointer(event+0x28);
+    const auto matrixEnd = reader.Pointer(graphics+0x1c0), matrixBegin = reader.Pointer(graphics+0x1bc);
+    const auto clipEnd = reader.Pointer(event+0x5c), clipBegin = reader.Pointer(event+0x58);
+    const auto offsetEnd = reader.Pointer(event+0x48), offsetBegin = reader.Pointer(event+0x44);
+    const auto& frame = moveLayout.Frame();
+    const bool valid = !MoveProjectionTarget && frame.width >= 320 && frame.height >= 200 &&
+        matrixEnd >= matrixBegin+64 && matrixEnd-matrixBegin <= 4096 && (matrixEnd-matrixBegin)%64 == 0 &&
+        clipEnd >= clipBegin+16 && clipEnd-clipBegin <= 4096 && (clipEnd-clipBegin)%16 == 0 &&
+        offsetEnd >= offsetBegin+8 && offsetEnd-offsetBegin <= 4096 && (offsetEnd-offsetBegin)%8 == 0 &&
+        reader.Read(matrixEnd-64,projection) && reader.Read(clipEnd-16,clip) && reader.Read(offsetEnd-8,offset);
+    const int panel = valid ? moveLayout.BeginDraw(reader,control,SetMoveGeometry,natural,displayed) : -1;
+    if (panel < 0) { original(reinterpret_cast<void*>(control),reinterpret_cast<void*>(event)); return; }
+    const float sx = float(displayed[2])/natural[2], sy = float(displayed[3])/natural[3];
+    auto logicalClip = clip;
+    for (unsigned i = 0; i < 4; ++i) {
+        const unsigned axis = i%2;
+        const float edge = offset[axis]+(clip[i]-offset[axis])/(axis ? sy : sx);
+        logicalClip[i] = static_cast<int32_t>(i < 2 ? std::ceil(edge) : std::floor(edge));
+    }
+    const auto load = reinterpret_cast<LoadProjection>(MoveProjectionOriginal);
+    moveProjection = MoveProjection::Around(float(offset[0]),float(offset[1]),sx,sy,frame.width,frame.height);
+    const auto adjusted = moveProjection.Apply(projection);
+    const bool clipWritten = WriteMoveClip(clipEnd-16,logicalClip);
+    if (!clipWritten) {
+        SetMoveGeometry(control,displayed,MovePanelCount,true);
+        original(reinterpret_cast<void*>(control),reinterpret_cast<void*>(event));
+        return;
+    }
+    MoveProjectionTarget = graphics;
+    load(reinterpret_cast<void*>(graphics),2,adjusted.data());
+    try {
+        original(reinterpret_cast<void*>(control),reinterpret_cast<void*>(event));
+    } catch (...) {
+        MoveProjectionTarget = 0;
+        load(reinterpret_cast<void*>(graphics),2,projection.data());
+        const auto end = reader.Pointer(event+0x5c), begin = reader.Pointer(event+0x58);
+        if (end >= begin && end-begin == clipEnd-clipBegin) WriteMoveClip(end-16,clip);
+        SetMoveGeometry(control,displayed,MovePanelCount,true);
+        throw;
+    }
+    MoveProjectionTarget = 0;
+    load(reinterpret_cast<void*>(graphics),2,projection.data());
+    const auto end = reader.Pointer(event+0x5c), begin = reader.Pointer(event+0x58);
+    if (end >= begin && end-begin == clipEnd-clipBegin) WriteMoveClip(end-16,clip);
+    moveLayout.EndDraw(reader,image,static_cast<unsigned>(panel),SetMoveGeometry,MovePendingLayout);
 }
 
 extern "C" void __fastcall CharacterSheetVisualDraw(uintptr_t visual,uintptr_t,uintptr_t event,SheetQuad area) {
@@ -244,20 +354,27 @@ static AddonHotkeyState OverlayHotkey(unsigned key,unsigned modifiers,bool activ
     return NativeHotkeys(reader,image).Check(key,modifiers,activation);
 }
 
-static bool CharacterInput(float x,float y,bool) {
+static bool PanelInput(float x,float y,unsigned offset,bool background,bool closeOnly = false) {
     NativeReader reader(image,CopyMemoryChecked,LookupLabel);
     if (!std::isfinite(x) || !std::isfinite(y) || x < 0 || y < 0 || x > 1 || y > 1 || !reader.InWorld()) return false;
-    const uintptr_t ui = reader.Pointer(image + 0x5314b0), root = reader.Pointer(image + 0x533e20), sheet = reader.Pointer(ui + 0x270);
+    const uintptr_t ui = reader.Pointer(image + 0x5314b0), root = reader.Pointer(image + 0x533e20), sheet = reader.Pointer(ui + offset);
     int32_t width = 0, height = 0;
-    if (!root || !sheet || !reader.Read(root + 0xf8,width) || !reader.Read(root + 0xfc,height) || width < 1 || height < 1 || width > 16384 || height > 16384) return false;
+    if (!root || !sheet || reader.Pointer(ui+0x180) || !reader.Read(root + 0xf8,width) || !reader.Read(root + 0xfc,height) || width < 1 || height < 1 || width > 16384 || height > 16384) return false;
     const int32_t point[] = {static_cast<int32_t>(x * width),static_cast<int32_t>(y * height)};
     uintptr_t node = VisibleControlAt(root,point);
+    if (closeOnly && offset == 0x23c) return NativeBankSort::Navigation(reader,image,node);
+    if (background && !closeOnly && reader.OverlayInput(node,false)) return true;
+    bool close = false;
     for (unsigned depth = 0; node && depth < 24; ++depth) {
-        if (node == sheet) return true;
+        if (node == sheet) return !closeOnly || close;
+        if (closeOnly) { const auto name = reader.String(node+0x10,96); close = close || name == "Close" || name == "Cancel"; }
         node = reader.Pointer(node + 0x14);
     }
     return false;
 }
+
+static bool CharacterInput(float x,float y,bool) { return PanelInput(x,y,0x270,false); }
+static bool BankInput(float x,float y,bool closeOnly) { return PanelInput(x,y,0x23c,true,closeOnly); }
 
 static void EnablePlayerPlate(uintptr_t stack) {
     __try {
@@ -301,8 +418,19 @@ static void RefreshUi(const NativeReader& reader) {
     const uint64_t now = GetTickCount64();
     const uintptr_t ui = reader.Pointer(image + 0x5314b0);
     const bool shown = reader.InWorld();
+    MoveLayoutSettings layoutSettings;
+    const bool moveInstalled = MeterOverlayMoveSettings(&layoutSettings,nullptr);
+    moveLayout.Prepare(reader,image,layoutSettings,moveInstalled,shown);
+    MoveUiFrameTarget = ui;
+    for (unsigned i = 0; i < 6; ++i) MoveControlTargets[i] = moveLayout.DrawTarget(i);
     const unsigned actions = MeterOverlayStatus();
     const bool enabled = MeterOverlayEnabled();
+    const bool cursorEnabled = MeterOverlayCursorEnabled();
+    unsigned bankAction = 0;
+    bool bankFocused = false;
+    const bool bankEnabled = MeterOverlayBankSettings(nullptr,&bankAction,&bankFocused);
+    bankSort.Service(reader,image,bankEnabled,bankAction,bankFocused,now);
+    MeterOverlayBankSettings(&bankSort.Frame(),nullptr,nullptr);
     MythicSettings soundSettings;
     unsigned previewVolume = 100;
     HWND browse = nullptr;
@@ -335,12 +463,14 @@ static void RefreshUi(const NativeReader& reader) {
         if (actions & 2) { history.Finish("Finished manually",now); nextHistory=0; }
         meter.Enable(enabled);
         if (!enabled) history.Pause(true);
-        if (!shown && inWorld) { meter.Zone(); history.LeaveZone(); nextRoster = 0; }
+        if (!shown && inWorld) { meter.Zone(); history.LeaveZone(); cursorCombat.Reset(); nextRoster = 0; }
+        if (!cursorEnabled) cursorCombat.Reset();
         inWorld = shown;
         if (shown && now >= nextRoster) {
             uint32_t self = 0;
             std::vector<MeterMember> members;
             const bool rosterReady = reader.Party(self, members) && meter.Roster(self, members);
+            cursorCombat.Player(cursorEnabled && rosterReady ? self : 0);
             if (!rosterReady) meter.Zone();
             std::string zoneKey;
             uint32_t seed = 0;
@@ -352,7 +482,9 @@ static void RefreshUi(const NativeReader& reader) {
             } else history.Pause();
             nextRoster = now + (rosterReady ? 500 : 100);
         }
-        InterlockedExchange(&collecting, shown && meter.HasRoster() && meter.Enabled() ? 1 : 0);
+        if (cursorEnabled && shown && !reader.LocalAvatarAlive()) cursorCombat.Reset();
+        InterlockedExchange(&collecting, shown && meter.HasRoster() && (meter.Enabled() || cursorEnabled) ? 1 : 0);
+        MeterOverlayCursorCombat(cursorEnabled ? cursorCombat.Until() : 0);
         if (now >= nextSnapshot) {
             meter.Snapshot(snapshot, now);
             updated = true;
@@ -422,11 +554,6 @@ static void Observe(unsigned kind, const HookRegisters& registers) {
         MeterHit hit;
         hit.before = before.hp;
         if (!reader.Read(before.unit + 0x2f0, hit.after) || !reader.Read(before.damage + 0x38, hit.amount) || !reader.Read(before.damage + 0x40, hit.element) || !reader.Read(before.damage + 0x3e, hit.damageClass)) { Fault("Measurement stopped: damage unavailable"); return; }
-        uint8_t damageFlags = 0;
-        hit.criticalKnown = reader.Read(before.damage + 0x41,damageFlags);
-        hit.critical = hit.criticalKnown && (damageFlags & 1);
-        const uintptr_t producer = reader.Pointer(before.damage + 0x30);
-        hit.criticalSource = reader.CriticalSource(producer,hit.damageClass);
         const auto source = reader.Pointer(before.damage + 0x2c);
         if (source == before.unit) return;
         hit.sourceId = reader.OwnerId(source);
@@ -434,22 +561,34 @@ static void Observe(unsigned kind, const HookRegisters& registers) {
         if (!hit.targetId) hit.targetPetOwnerId = reader.OwnerId(before.unit);
         if (!hit.sourceId && !hit.targetId && !hit.targetPetOwnerId) return;
         hit.pet = hit.sourceId && !reader.PlayerId(source);
+        std::lock_guard<std::recursive_mutex> lock(stateGate);
+        const uint64_t now = GetTickCount64();
+        if (MeterOverlayCursorEnabled()) {
+            cursorCombat.Hit(hit.sourceId,hit.targetId,hit.targetPetOwnerId,hit.before,hit.after,now);
+            MeterOverlayCursorCombat(cursorCombat.Until());
+        }
+        if (!meter.Enabled()) return;
+        uint8_t damageFlags = 0;
+        hit.criticalKnown = reader.Read(before.damage + 0x41,damageFlags);
+        hit.critical = hit.criticalKnown && (damageFlags & 1);
+        const uintptr_t producer = reader.Pointer(before.damage + 0x30);
+        hit.criticalSource = reader.CriticalSource(producer,hit.damageClass);
         const auto attacker=reader.Identity(source), target=reader.Identity(before.unit);
         hit.sourceKey=attacker.first; hit.sourceName=attacker.second;
         hit.targetKey=target.first; hit.targetName=target.second;
         const auto skill = reader.Skill(reader.Pointer(before.damage + 0x30));
         hit.skillKey = skill.first;
         hit.skillName = skill.second;
-        std::lock_guard<std::recursive_mutex> lock(stateGate);
-        const uint64_t now = GetTickCount64();
         meter.Hit(hit, now);
         history.Hit(hit, now);
-        if (!meter.Enabled()) InterlockedExchange(&collecting, 0);
         return;
     }
     if (kind == 2) {
         std::lock_guard<std::recursive_mutex> lock(stateGate);
         mythicSounds.Reset(reader,image);
+        cursorCombat.Reset();
+        MeterOverlayCursorCombat(0);
+        bankSort.Reset();
         meter.Zone();
         history.LeaveZone();
         inWorld = false;
@@ -467,8 +606,10 @@ static void Observe(unsigned kind, const HookRegisters& registers) {
         return;
     }
     if (kind == 5) { MeterOverlayInvalidate(); return; }
+    if (kind == 13) { moveLayout.BeginFrame(reader,image,registers.ecx,SetMoveGeometry); return; }
     if (kind == 4) {
         if (!uiPrepared || !reader.InWorld()) RefreshUi(reader);
+        MeterOverlayMoveSettings(nullptr,&moveLayout.Frame());
         MeterOverlayEndFrame();
         SyncMenuFrame(reader);
         uiPrepared = false;
@@ -481,8 +622,10 @@ static void Observe(unsigned kind, const HookRegisters& registers) {
         if (control == ui) {
             RefreshUi(reader);
             uiPrepared = true;
+            moveLayout.BeforeChildren(reader,image,control,SetMoveGeometry,MovePendingLayout);
             return;
         }
+        if (uiPrepared) moveLayout.BeforeChildren(reader,image,control,SetMoveGeometry,MovePendingLayout);
         if (!uiPrepared || !control || control != reader.UiForeground()) return;
         const uintptr_t graphics = reader.Pointer(image + 0x533a44);
         const auto device = reinterpret_cast<IDirect3DDevice9*>(reader.Pointer(graphics + 0x1c));
@@ -493,6 +636,7 @@ static void Observe(unsigned kind, const HookRegisters& registers) {
         else if (registers.edi == reader.Pointer(ui + 0x26c)) layer = AddonUiLayer::Effects;
         else if (registers.edi == reader.Pointer(ui + 0x1dc)) layer = AddonUiLayer::Menu;
         else if (registers.edi == reader.Pointer(ui + 0x270)) layer = AddonUiLayer::CharacterSheet;
+        else if (registers.edi == reader.Pointer(ui + 0x23c)) layer = AddonUiLayer::Bank;
         else return;
         if (!reader.InWorld()) return;
         if (layer == AddonUiLayer::CharacterSheet) {
@@ -521,7 +665,10 @@ extern "C" void __cdecl MeterDispatch(unsigned kind, const HookRegisters* regist
 
 struct HookSpec { uintptr_t rva; const char* bytes; void* handler; void** original; };
 static HookSpec hooks[] = {
+    {0x281187, "558bceffd08b4f082b4f04c1f904", reinterpret_cast<void*>(MoveControlHook), &MoveControlOriginal},
+    {0x2e1520, "8bc10fb74c240483f911", reinterpret_cast<void*>(MoveProjectionHook), &MoveProjectionOriginal},
     {0x281000, "6aff68387c7c0064a100000000506489250000000083ec10", reinterpret_cast<void*>(MeterUiBegin), &MeterUiBeginOriginal},
+    {0x280f00, "558bec83e4f883ec1c5356578bf98b87b4000000c1e806a8", reinterpret_cast<void*>(MoveUiFrameHook), &MoveUiFrameOriginal},
     {0x280fc5, "8b4b342b4b30c1f90285c976168b43348bd02b5330f7c2fc", reinterpret_cast<void*>(MeterUiControl), &MeterUiControlOriginal},
     {0x10bfd8, "8b83f00200008b4d383bc1760a2bc18983f0020000", reinterpret_cast<void*>(MeterBefore), &MeterBeforeOriginal},
     {0x10bffc, "8a453e3c040f84080100008b8b34010000", reinterpret_cast<void*>(MeterCommit), &MeterCommitOriginal},
@@ -556,13 +703,20 @@ static bool Matches(const HookSpec& hook) {
 static bool InstallHooks() {
     for (const auto& hook : hooks) if (!Matches(hook)) return false;
     if (!Matches({0x27fed0, "8b91fc0000008b4424043b5004", nullptr, nullptr}) || !Matches({0x27fc60, "8b91f00000008b4424043b10", nullptr, nullptr})) return false;
+    if (!Matches({0x281d50,"558bec83e4f883ec18535556578be98b8d18",nullptr,nullptr}) ||
+        !Matches({0x53630,"568bf1e818e722008b86900100008b8e9401",nullptr,nullptr})) return false;
     if (!Matches({0x86f17,"8b44241083c008894424103b4424300f8514fcffff8b7424",nullptr,nullptr}) ||
         !Matches({0x1ffca0,"64a1000000006aff68636f7c0050648925000000008b8394",nullptr,nullptr}) ||
         !Matches({0x22c260,"518b0085c074048b08eb0233c985c0740583c004eb05b806",nullptr,nullptr})) return false;
     if (!Matches({0x281540,"83ec14535556578bf98b87b4000000c1e803897c2414a801",nullptr,nullptr})) return false;
+    if (!Matches({0x18beb0,"6aff68fb707c0064a100000000506489250000000083ec08",nullptr,nullptr}) ||
+        !Matches({0x18bd80,"6aff68cb717c0064a100000000506489250000000083ec08",nullptr,nullptr}) ||
+        !Matches({0x18e400,"565785c07454e8b512ffff8bf0f686d800000001",nullptr,nullptr})) return false;
     if (!Matches({0x288f04,"c7842428010000ffffffff85f674168d560483c8fff00fc1",nullptr,nullptr})) return false;
     static NativePatchSet patches;
-    const size_t lengths[] = {7,6,6,5,8,7,5,6,6,8,6,6,6,6,7,6,7,7,9,7,7};
+    MoveControlContinue = image+0x28118c;
+    const size_t lengths[] = {5,7,7,6,6,6,5,8,7,5,6,6,8,6,6,6,6,7,6,7,7,9,7,7};
+    static_assert(std::size(lengths) == std::size(hooks));
     std::array<NativePatchSpec,std::size(hooks)> specs{};
     for (size_t i=0;i<specs.size();++i) specs[i]={reinterpret_cast<void*>(image+hooks[i].rva),hooks[i].handler,hooks[i].original,hooks[i].bytes,lengths[i]};
     InterlockedExchange(&ready, 1);
@@ -597,6 +751,7 @@ static BOOL CALLBACK InitializeAddon(PINIT_ONCE, PVOID, PVOID*) {
         MeterOverlayInputTest(OverlayInput);
         MeterOverlayHotkeyTest(OverlayHotkey);
         MeterOverlayCharacterInputTest(CharacterInput);
+        MeterOverlayBankInputTest(BankInput);
         InterlockedExchange(&nameplateMask,static_cast<LONG>(MeterOverlayNameplates()));
         if (!InstallHooks()) throw std::runtime_error("Native hook validation failed; addon disabled");
         std::ofstream output(status, std::ios::trunc);

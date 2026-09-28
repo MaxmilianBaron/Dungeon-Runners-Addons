@@ -36,6 +36,8 @@ New-Item -ItemType Directory -Force -Path $OutputDirectory | Out-Null
 if ($LASTEXITCODE -ne 0) { throw 'Verified skill catalog generation failed' }
 & $python (Join-Path $PSScriptRoot 'build_native_skin.py') $ClientDirectory $OutputDirectory
 if ($LASTEXITCODE -ne 0) { throw 'Native UI resource generation failed' }
+& $python (Join-Path $PSScriptRoot 'build_bank_catalog.py') $ClientDirectory $OutputDirectory
+if ($LASTEXITCODE -ne 0) { throw 'Bank item catalog generation failed' }
 $options = @('/nologo','/O2','/MT','/EHsc','/std:c++17','/utf-8','/W4','/DUNICODE','/D_UNICODE','/DWIN32_LEAN_AND_MEAN','/DNOMINMAX',"/I$OutputDirectory")
 Push-Location -LiteralPath $OutputDirectory
 try {
@@ -46,7 +48,7 @@ try {
 } finally { Pop-Location }
 Get-Item -LiteralPath (Join-Path $OutputDirectory 'd3d9.dll'),(Join-Path $OutputDirectory 'Addons.dll') | Select-Object FullName,Length
 
-foreach ($addon in @('DamageMeter','HideGoldLabels','CooldownTimers','Nameplates','BetterCharacterSheet','MythicDropSounds','WishingWellTracker')) {
+foreach ($addon in @('DamageMeter','HideGoldLabels','CooldownTimers','Nameplates','BetterCharacterSheet','MythicDropSounds','WishingWellTracker','CursorCircle','SortBankPages','Moveeverything')) {
     $destination = Join-Path $OutputDirectory ("Addons\"+$addon)
     New-Item -ItemType Directory -Path $destination -Force | Out-Null
     Copy-Item -LiteralPath (Join-Path $repositoryDirectory ("Addons\"+$addon+"\addon.ini")) -Destination $destination -Force

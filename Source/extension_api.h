@@ -50,3 +50,4 @@ struct ExtensionSettings {
     BOOL (WINAPI* apply)(void*,const int*,uint32_t,char*,uint32_t);
 };
 using ExtensionGetSettings = BOOL (WINAPI*)(ExtensionSettings*);
+using ExtensionGetStatus = BOOL (WINAPI*)(char*,uint32_t);

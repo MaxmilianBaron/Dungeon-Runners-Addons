@@ -23,6 +23,9 @@
 - **Better Character Sheet** — Shows Weapon Crit, Magic Crit, Stun Resist, Movement and resist chances.
 - **Mythic Drop Sounds** — Sound and chat alerts for your and party Mythic drops, with volume and custom WAV/MP3 support.
 - **Wishing Well Tracker** — Cooldown timer with reminders and custom sounds.
+- **Moveeverything** — Move and resize player, party and target frames, chat and minimap.
+- **Cursor Circle** — Highlights your cursor during combat, with adjustable size and color.
+- **Sort Bank Pages** — Sort one bank page or all unlocked pages by item type, appearance and armor set.
 
 <details>
 <summary>Mac / Linux setup</summary>

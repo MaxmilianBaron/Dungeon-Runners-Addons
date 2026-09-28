@@ -9,6 +9,13 @@ void* MeterPresentOriginal = nullptr;
 void* MeterResourcesOriginal = nullptr;
 void* MeterUiBeginOriginal = nullptr;
 void* MeterUiControlOriginal = nullptr;
+void* MoveUiFrameOriginal = nullptr;
+volatile uintptr_t MoveUiFrameTarget = 0;
+void* MoveControlOriginal = nullptr;
+uintptr_t MoveControlContinue = 0;
+volatile uintptr_t MoveControlTargets[6] = {};
+void* MoveProjectionOriginal = nullptr;
+volatile uintptr_t MoveProjectionTarget = 0;
 void* MythicDropOriginal = nullptr;
 void* MythicInventoryOriginal = nullptr;
 void* WellAcceptedOriginal = nullptr;
@@ -63,6 +70,54 @@ METER_STUB(MythicInventoryHook, MythicInventoryOriginal, 9)
 METER_STUB(WellAcceptedHook, WellAcceptedOriginal, 10)
 METER_STUB(WellFinalizedHook, WellFinalizedOriginal, 11)
 METER_STUB(WellLoginHook, WellLoginOriginal, 12)
+METER_STUB(MoveUiFrameDispatch, MoveUiFrameOriginal, 13)
+
+extern "C" __declspec(naked) void MoveControlHook() {
+    __asm pushfd
+    __asm cmp esi, dword ptr [MoveControlTargets]
+    __asm je scaled
+    __asm cmp esi, dword ptr [MoveControlTargets+4]
+    __asm je scaled
+    __asm cmp esi, dword ptr [MoveControlTargets+8]
+    __asm je scaled
+    __asm cmp esi, dword ptr [MoveControlTargets+12]
+    __asm je scaled
+    __asm cmp esi, dword ptr [MoveControlTargets+16]
+    __asm je scaled
+    __asm cmp esi, dword ptr [MoveControlTargets+20]
+    __asm je scaled
+    __asm popfd
+    __asm jmp dword ptr [MoveControlOriginal]
+    __asm scaled:
+    __asm popfd
+    __asm mov edx,eax
+    __asm push ebp
+    __asm mov ecx,esi
+    __asm call MoveControlDraw
+    __asm jmp dword ptr [MoveControlContinue]
+}
+
+extern "C" __declspec(naked) void MoveProjectionHook() {
+    __asm pushfd
+    __asm cmp ecx, dword ptr [MoveProjectionTarget]
+    __asm jne original
+    __asm popfd
+    __asm jmp MoveProjectionLoad
+    __asm original:
+    __asm popfd
+    __asm jmp dword ptr [MoveProjectionOriginal]
+}
+
+extern "C" __declspec(naked) void MoveUiFrameHook() {
+    __asm pushfd
+    __asm cmp ecx, dword ptr [MoveUiFrameTarget]
+    __asm jne original
+    __asm popfd
+    __asm jmp MoveUiFrameDispatch
+    __asm original:
+    __asm popfd
+    __asm jmp dword ptr [MoveUiFrameOriginal]
+}
 
 extern "C" __declspec(naked) void CharacterSheetVisualHook() {
     __asm cmp ecx, dword ptr [CharacterSheetVisualTarget]
