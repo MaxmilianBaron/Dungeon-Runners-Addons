@@ -24,8 +24,11 @@
 #include "mythic_sounds.h"
 #include "wishing_well.h"
 #include "combat_cursor.h"
+#include "cursor_ring.h"
 #include "bank_sort.h"
 #include "move_layout.h"
+#include "loadouts_store.h"
+#include "loadout_name.h"
 
 
 
@@ -92,12 +95,27 @@ static CombatCursorSettings cursorOptions, draftCursorOptions;
 static std::filesystem::path cursorSettings;
 static std::string cursorMessage;
 static uint64_t cursorCombatUntil = 0;
+static CursorRing combatCursorRing, previewCursorRing;
 static BankSortFrame bankFrame;
 static unsigned bankAction = 0;
 static bool bankEnabled = true, draftBankEnabled = true;
 static std::filesystem::path bankSettings;
 static std::string bankMessage;
 static RECT bankArea{};
+static LoadoutStore loadoutStore;
+static LoadoutFrame loadoutFrame;
+static LoadoutCommand loadoutCommand;
+static bool loadoutOpen=false, loadoutEditor=false, loadoutDelete=false, loadoutRenaming=false;
+static LoadoutNameInput loadoutName;
+static std::array<bool,256> loadoutKeys{};
+static int loadoutEditing=-1, loadoutCapture=-2;
+static uint64_t loadoutResponse=0;
+static std::string loadoutMessage;
+static RECT loadoutArea{};
+static RECT loadoutListButton{},loadoutAddButton{},loadoutNameArea{};
+static bool LoadoutContains(POINT point) { return PtInRect(&loadoutArea,point) || PtInRect(&loadoutListButton,point) || PtInRect(&loadoutAddButton,point); }
+static AddonInputTest loadoutInputTest=nullptr;
+static bool LoadoutInput(HWND,UINT,WPARAM,LPARAM);
 static MoveLayoutSettings moveOptions, draftMoveOptions;
 static MoveLayoutFrame moveFrame;
 static std::filesystem::path moveSettings;
@@ -379,6 +397,7 @@ static bool InputAllowed(UiPoint point,bool menuLayer) {
     if (moveEditing) return true;
     const auto display = Ui::GetIO().DisplaySize;
     const POINT pointer{static_cast<LONG>(point.x),static_cast<LONG>(point.y)};
+    if (loadoutInputTest && loadoutFrame.visible && LoadoutContains(pointer) && display.x>0 && display.y>0) return loadoutInputTest(point.x/display.x,point.y/display.y,false);
     if (bankInputTest && bankFrame.visible && PtInRect(&bankArea,pointer) && display.x > 0 && display.y > 0) return bankInputTest(point.x/display.x,point.y/display.y,false);
     if (!nativeInputTest) return true;
     return display.x > 0 && display.y > 0 && nativeInputTest(point.x / display.x,point.y / display.y,menuLayer);
@@ -396,6 +415,8 @@ static LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wparam
             return 0;
         }
         if (context && !shuttingDown) {
+            Ui::SetCurrentContext(context);
+            if (LoadoutInput(window,message,wparam,lparam)) return 0;
             const auto previousDraft=draftVisibilityHotkey;
             auto binding=visibilityHotkey;
             if (!hotkeyInput.recording && worldVisible && nativeHotkeyTest && (message==WM_KEYDOWN || message==WM_SYSKEYDOWN) && wparam==binding.key && nativeHotkeyTest(binding.key,binding.modifiers,true)!=AddonHotkeyState::Available) binding={0,0};
@@ -475,6 +496,7 @@ static LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wparam
 }
 
 static void ShutdownUnlocked() {
+    combatCursorRing.Reset(); previewCursorRing.Reset();
     std::vector<MeterDetailRow>().swap(detailRows); std::vector<float>().swap(detailOffsets); cachedDetailRevision = UINT64_MAX;
     EndPanelResize();
     hotkeyInput.Reset();
@@ -606,6 +628,8 @@ static std::string MeterName(const char* text,UiPoint scale,float width) {
 }
 
 static void Heading(UiDrawList* draw, const char* text, UiPoint position, UiPoint scale, float width, float factor = 1) {
+    const float textWidth = nativeSkin.TextWidth(text,1);
+    if (textWidth > 0) factor = std::min(factor,width/textWidth);
     nativeSkin.Text(draw, text, position, UiPoint(width * scale.x, 24 * scale.y), UiPoint(scale.x * factor, scale.y * factor));
 }
 
@@ -622,10 +646,10 @@ static void DrawHelp() {
     if (help.text.empty()) return;
     const UiPoint display = Ui::GetIO().DisplaySize;
     const UiPoint scale = FitScale(help.scale, UiPoint(205, 300));
-    const float width = (help.native ? 190 : 205) * scale.x, padding = (help.native ? 11 : 15) * scale.x;
+    const float width = (help.native ? 190 : 205) * scale.x, padding = (help.native ? 11 : 24) * scale.x;
     const float textSize = help.native ? valueFont->SizeForEm(14 * scale.y) : 14 * scale.y;
     const UiPoint extent = valueFont->CalcTextSizeA(textSize, FLT_MAX, width - padding * 2, help.text.c_str());
-    const UiPoint size(width, extent.y + (help.native ? 12 : 28) * scale.y);
+    const UiPoint size(width, extent.y + (help.native ? 12 : 36) * scale.y);
     UiPoint position = help.position;
     if (position.x + size.x > display.x - 8) position.x = help.otherEdge - size.x - 5 * scale.x;
     position.x = std::clamp(position.x, 8.0f, std::max(8.0f, display.x - size.x - 8));
@@ -636,7 +660,7 @@ static void DrawHelp() {
         draw->AddText(valueFont,textSize,At(position,scale,11,6),UI_WHITE,help.text.c_str(),nullptr,width - padding * 2);
     } else {
         nativeSkin.Frame(draw, position, size, scale);
-        BodyText(draw, help.text.c_str(), At(position, scale, 15, 14), scale, UI_WHITE, width - padding * 2);
+        BodyText(draw, help.text.c_str(), At(position, scale, 24, 18), scale, UI_WHITE, width - padding * 2);
     }
     helpRect = Rectangle(position, size);
 }
@@ -799,7 +823,7 @@ static void DrawDetails(const MeterView& view,const char* period=nullptr) {
     }
     if (!player) { selectedCharacter = 0; selectedPet = 0; detailSkill = 0; return; }
     const UiPoint display = Ui::GetIO().DisplaySize;
-    const float detailHeight = detailSkill ? 490.0f : 420.0f;
+    const float detailHeight = detailSkill ? 516.0f : 446.0f;
     const UiPoint scale = MeterScale(UiPoint(720,detailHeight));
     const UiPoint size(720 * scale.x, detailHeight * scale.y);
     Ui::SetNextWindowSize(size);
@@ -816,15 +840,15 @@ static void DrawDetails(const MeterView& view,const char* period=nullptr) {
         nativeSkin.Frame(draw, origin, size, scale);
         Heading(draw, direction ? "Damage Taken" : "Damage Done", point(23,17), scale, 350);
         if (showBack) {
-            back = SkinControl("detail-back","Back",point(showView ? 378.0f : 478.0f,10),UiPoint((showView ? 90.0f : 142.0f) * scale.x,29.25f * scale.y),UiPoint(scale.x * 0.72f,scale.y * 0.72f),&detailBackRect);
+            back = SkinControl("detail-back","Back",point(showView ? 372.0f : 472.0f,16),UiPoint((showView ? 90.0f : 142.0f) * scale.x,29.25f * scale.y),UiPoint(scale.x * 0.72f,scale.y * 0.72f),&detailBackRect);
             if (Ui::IsItemHovered()) QueueHelp(detailSkill ? "Returns to the skill list. Escape does the same." : showView ? "Returns to this dungeon's players. Escape does the same." : "Returns to the attacker or target list. Escape does the same.",point(725,10),scale,origin.x);
         }
         if (showView) {
             const bool showSkills = detailByActor;
-            if (SkinControl("detail-view",showSkills ? "Skills" : "Targets",point(478,10),UiPoint(142 * scale.x,29.25f * scale.y),UiPoint(scale.x * 0.72f,scale.y * 0.72f),&detailViewRect)) { detailByActor=!detailByActor; detailActor=0; detailActorName.clear(); }
+            if (SkinControl("detail-view",showSkills ? "Skills" : "Targets",point(472,16),UiPoint(142 * scale.x,29.25f * scale.y),UiPoint(scale.x * 0.72f,scale.y * 0.72f),&detailViewRect)) { detailByActor=!detailByActor; detailActor=0; detailActorName.clear(); }
             if (Ui::IsItemHovered()) QueueHelp(showSkills ? "Shows skills across all attackers or targets in the selected view." : "Shows targets in the selected view. Click a target for its skill breakdown.",point(725,10),scale,origin.x);
         }
-        close = SkinControl("close", "Close", point(630,10), UiPoint(72 * scale.x,29.25f * scale.y), UiPoint(scale.x * 0.75f,scale.y * 0.75f), &detailCloseRect);
+        close = SkinControl("close", "Close", point(624,16), UiPoint(72 * scale.x,29.25f * scale.y), UiPoint(scale.x * 0.75f,scale.y * 0.75f), &detailCloseRect);
         if (Ui::IsItemHovered()) QueueHelp("Closes this window and returns to the damage meter.",point(725,10),scale,origin.x);
         char summary[192];
         std::snprintf(summary,sizeof(summary),"%s  |  %s damage  |  %.0f DPS",player->name,FormatDamage(player->damage).c_str(),player->dps);
@@ -974,7 +998,9 @@ static void DrawDetails(const MeterView& view,const char* period=nullptr) {
         Ui::EndChild();
         }
         draw->AddLine(point(23,390),point(694,390),UI_COLOR(109,79,33,200),scale.y);
-        BodyText(draw,detailHasLimit ? "Detail limit reached; total damage is preserved" : detailActorName.empty() ? (selectedPet ? "Pet damage received, grouped across all summons of this type" : "Effective HP damage observed by this client") : detailActorName.c_str(),point(23,detailHeight-23),scale,detailHasLimit ? GoldColor : MutedColor);
+        draw->PushClipRect(point(23,detailHeight-47),point(697,detailHeight-18));
+        BodyText(draw,detailHasLimit ? "Detail limit reached; total damage is preserved" : detailActorName.empty() ? (selectedPet ? "Pet damage received, grouped across all summons of this type" : "Effective HP damage observed by this client") : detailActorName.c_str(),point(23,detailHeight-47),scale,detailHasLimit ? GoldColor : MutedColor,674*scale.x);
+        draw->PopClipRect();
         if (HoverArea(point(23,391),UiPoint(570 * scale.x,20 * scale.y)))
             QueueHelp("Counts actual HP removed, capped at the target's remaining HP. Only combat simulated by this client is visible. Distant party damage and pet ownership may be unavailable.",point(725,320),scale,origin.x);
         if (!addonsOpen && !reportOpen) RegisterHitArea();
@@ -1135,8 +1161,8 @@ static void DrawHistory() {
     for (const auto& entry:historyData.records) if (entry->id==historySelected) record=entry.get();
     if (!record) { historySelected=0; selectedCharacter=0; selectedPet=0; }
     if (record && selectedCharacter) { DrawDetails(direction ? record->taken : record->view,"Dungeon run"); return; }
-    const UiPoint scale=MeterScale(UiPoint(700,440));
-    const UiPoint size(700*scale.x,440*scale.y),display=Ui::GetIO().DisplaySize;
+    const UiPoint scale=MeterScale(UiPoint(700,456));
+    const UiPoint size(700*scale.x,456*scale.y),display=Ui::GetIO().DisplaySize;
     Ui::SetNextWindowSize(size);
     Ui::SetNextWindowPos(UiPoint((display.x-size.x)*0.5f,(display.y-size.y)*0.5f));
     bool back=false;
@@ -1147,7 +1173,7 @@ static void DrawHistory() {
         historyArea=Rectangle(origin,size);
         nativeSkin.Frame(draw,origin,size,scale);
         Heading(draw,"Dungeon History",point(24,17),scale,470);
-        back=SkinControl("history-back",record ? "Back" : "Close",point(600,10),UiPoint(78*scale.x,29*scale.y),UiPoint(scale.x*.75f,scale.y*.75f),&historyBackRect);
+        back=SkinControl("history-back",record ? "Back" : "Close",point(598,16),UiPoint(78*scale.x,29*scale.y),UiPoint(scale.x*.75f,scale.y*.75f),&historyBackRect);
         if (!record) {
             BodyText(draw,"Last 20 runs. Select a dungeon for players and skill details.",point(24,49),scale,MutedColor);
             Ui::SetCursorScreenPos(point(20,79));
@@ -1211,7 +1237,7 @@ static void DrawHistory() {
                 }
             }
             Ui::EndChild();
-            if (DrawSkinControl("Report",point(365,347),scale,&historyReportRect)) OpenReport(record->id);
+            if (DrawSkinControl("Report",point(record->flags&1 ? 365.f : 279.5f,347),scale,&historyReportRect)) OpenReport(record->id);
             if (record->flags&1) {
                 if (DrawSkinControl("Finish run",point(180,347),scale,&historyFinishRect)) { InterlockedOr(&actions,2); historySelected=0; selectedCharacter=0; selectedPet=0; }
                 if (Ui::IsItemHovered()) QueueHelp("Archives this run manually. Use after resetting an instance when no new floor seed has been observed yet. Does not reset the game or erase history.",point(705,300),scale,origin.x);
@@ -1273,8 +1299,8 @@ static void ApplyAddons() {
 static int OptionRow(const char* label,const char* value,UiPoint position,UiPoint scale,const char* description,UiPoint tooltip, float left,RECT* bounds = nullptr) {
     UiDrawList* draw = Ui::GetWindowDrawList();
     const UiPoint size(330 * scale.x,30 * scale.y);
-    draw->AddRectFilled(position,UiPoint(position.x+size.x,position.y+size.y),UI_COLOR(0,0,0,100));
-    nativeSkin.AlignedText(draw,label,At(position,scale,25,0),UiPoint(163 * scale.x,30 * scale.y),scale);
+    draw->AddRectFilled(At(position,scale,14,0),At(position,scale,316,30),UI_COLOR(0,0,0,100));
+    nativeSkin.AlignedText(draw,label,At(position,scale,25,0),UiPoint(143 * scale.x,30 * scale.y),scale);
     const UiPoint extent = valueFont->CalcTextSizeA(14 * scale.y,FLT_MAX,0,value);
     BodyText(draw,value,UiPoint(position.x+238 * scale.x-extent.x * 0.5f,position.y+(30*scale.y-extent.y)*.5f),scale,UI_WHITE);
     int clicked = 0;
@@ -1301,8 +1327,8 @@ static void DrawDamageSettings(UiPoint origin,UiPoint scale) {
     const int step = OptionRow("UI scale:",zoom,point(10,172),scale,"Resizes the meter, details, history and reports. 100% follows the game's UI size. Apply with Okay. You can also drag the meter edges to change its width and bar height.",point(355,172),origin.x,&meterScaleRect);
     if (step) draftMeterScalePercent = static_cast<unsigned>(std::clamp(static_cast<int>(draftMeterScalePercent)+step*10,50,200));
     auto* draw=Ui::GetWindowDrawList();
-    draw->AddRectFilled(point(10,210),point(340,240),UI_COLOR(0,0,0,100));
-    nativeSkin.AlignedText(draw,"Show / hide:",point(35,210),UiPoint(145*scale.x,30*scale.y),scale);
+    draw->AddRectFilled(point(24,210),point(326,240),UI_COLOR(0,0,0,100));
+    nativeSkin.AlignedText(draw,"Show / hide:",point(35,210),UiPoint(135*scale.x,30*scale.y),scale);
     const auto keyName=hotkeyInput.recording ? std::string("Press a key...") : draftVisibilityHotkey.Name();
     Ui::SetCursorScreenPos(point(180,212));
     const bool keyClicked=Ui::InvisibleButton("meter-hotkey",UiPoint(136*scale.x,26*scale.y));
@@ -1401,7 +1427,7 @@ static void DrawWellSettings(UiPoint origin,UiPoint scale) {
         if (OptionRow("Announcements:",alert.announcements ? "On" : "Off",point(10,210),scale,
             "Shows a white reminder with a red exclamation mark in your chat.",point(355,210),origin.x)) alert.announcements = !alert.announcements;
         Heading(draw,"Sound:",point(35,251),scale,200,0.85f);
-        draw->AddRectFilled(point(10,271),point(340,303),UI_COLOR(0,0,0,100));
+        draw->AddRectFilled(point(24,271),point(326,303),UI_COLOR(0,0,0,100));
         for (unsigned side = 0; side < 2; ++side) {
             const auto at = point(side ? 305.f : 25.f,277);
             Ui::SetCursorScreenPos(at);
@@ -1442,7 +1468,7 @@ static void DrawMythicSettings(UiPoint origin,UiPoint scale) {
     if (OptionRow("Announcements:",draftMythicOptions.announcements ? "On" : "Off",point(10,96),scale,
         "Shows Mythic drop messages in your chat.",point(355,96),origin.x)) draftMythicOptions.announcements = !draftMythicOptions.announcements;
     Heading(draw,"Sound:",point(35,137),scale,200,0.85f);
-    draw->AddRectFilled(point(10,157),point(340,189),UI_COLOR(0,0,0,100));
+    draw->AddRectFilled(point(24,157),point(326,189),UI_COLOR(0,0,0,100));
     for (unsigned side=0;side<2;++side) {
         const UiPoint at = point(side ? 305.0f : 25.0f,163);
         Ui::SetCursorScreenPos(at);
@@ -1524,24 +1550,25 @@ static void DrawMoveOutline(UiDrawList* draw,UiPoint origin,UiPoint size,float s
 static void DrawMoveEditor() {
     if (!moveEditing || !addonsOpen || !worldVisible || !nativeSkin.Ready() || logicalUiSize.x < 320 || logicalUiSize.y < 200) return;
     const auto display = Ui::GetIO().DisplaySize, scale = GameScale();
-    const auto toolbarScale = FitScale(scale,UiPoint(480,132));
-    const UiPoint size(480*toolbarScale.x,132*toolbarScale.y), origin((display.x-size.x)*0.5f,std::max(0.0f,display.y-size.y-12*toolbarScale.y));
+    const float toolbarHeight = moveMessage.empty() ? 132.f : 156.f;
+    const auto toolbarScale = FitScale(scale,UiPoint(480,toolbarHeight));
+    const UiPoint size(480*toolbarScale.x,toolbarHeight*toolbarScale.y), origin((display.x-size.x)*0.5f,std::max(0.0f,display.y-size.y-12*toolbarScale.y));
     Ui::SetNextWindowPos(UiPoint(0,0)); Ui::SetNextWindowSize(display);
     if (Ui::Begin("##Moveeverything",nullptr,SurfaceFlags | Ui::NoSavedSettings)) {
         auto* draw = Ui::GetWindowDrawList();
         RegisterHitArea();
         moveToolbar = Rectangle(origin,size);
         nativeSkin.Frame(draw,origin,size,toolbarScale);
-        Heading(draw,"Moveeverything",At(origin,toolbarScale,20,12),toolbarScale,310);
-        if (SkinControl("MoveToggle",draftMoveOptions.enabled ? "On" : "Off",At(origin,toolbarScale,365,8),UiPoint(95*toolbarScale.x,29*toolbarScale.y),toolbarScale,&moveToggle)) draftMoveOptions.enabled = !draftMoveOptions.enabled;
-        BodyText(draw,"Drag the highlighted panels. Drag a corner to resize.",At(origin,toolbarScale,20,41),UiPoint(toolbarScale.x*.86f,toolbarScale.y*.86f),BodyColor,440*toolbarScale.x);
-        if (SkinControl("MoveOkay","Okay",At(origin,toolbarScale,18,78),UiPoint(141*toolbarScale.x,34*toolbarScale.y),toolbarScale,&moveOkay)) {
+        nativeSkin.AlignedText(draw,"Moveeverything",At(origin,toolbarScale,24,18),UiPoint(310*toolbarScale.x,24*toolbarScale.y),toolbarScale);
+        if (SkinControl("MoveToggle",draftMoveOptions.enabled ? "On" : "Off",At(origin,toolbarScale,361,18),UiPoint(95*toolbarScale.x,29*toolbarScale.y),toolbarScale,&moveToggle)) draftMoveOptions.enabled = !draftMoveOptions.enabled;
+        BodyText(draw,"Drag the highlighted panels. Drag a corner to resize.",At(origin,toolbarScale,24,50),UiPoint(toolbarScale.x*.86f,toolbarScale.y*.86f),BodyColor,432*toolbarScale.x);
+        if (SkinControl("MoveOkay","Okay",At(origin,toolbarScale,24,78),UiPoint(136*toolbarScale.x,34*toolbarScale.y),toolbarScale,&moveOkay)) {
             if (SaveMoveSettings()) { moveOptions = draftMoveOptions; moveEditing = false; moveSelected = -1; activeAddon = nullptr; }
             else moveMessage = "Settings could not be saved.";
         }
-        if (SkinControl("MoveReset","Reset",At(origin,toolbarScale,170,78),UiPoint(141*toolbarScale.x,34*toolbarScale.y),toolbarScale,&moveReset)) { draftMoveOptions.panels = {}; moveSelected = -1; }
-        if (SkinControl("MoveBack","Back",At(origin,toolbarScale,321,78),UiPoint(141*toolbarScale.x,34*toolbarScale.y),toolbarScale,&moveBack)) BackFromAddons();
-        if (!moveMessage.empty()) BodyText(draw,moveMessage.c_str(),At(origin,toolbarScale,20,113),UiPoint(toolbarScale.x*.75f,toolbarScale.y*.75f),GoldColor,440*toolbarScale.x);
+        if (SkinControl("MoveReset","Reset",At(origin,toolbarScale,172,78),UiPoint(136*toolbarScale.x,34*toolbarScale.y),toolbarScale,&moveReset)) { draftMoveOptions.panels = {}; moveSelected = -1; }
+        if (SkinControl("MoveBack","Back",At(origin,toolbarScale,320,78),UiPoint(136*toolbarScale.x,34*toolbarScale.y),toolbarScale,&moveBack)) BackFromAddons();
+        if (!moveMessage.empty()) BodyText(draw,moveMessage.c_str(),At(origin,toolbarScale,24,119),UiPoint(toolbarScale.x*.85f,toolbarScale.y*.85f),GoldColor,432*toolbarScale.x);
         if (moveEditing) {
             static constexpr std::array<const char*,MovePanelCount> names = {"Player HP / Mana","Party UI","Target","Chat","Minimap","Buffs / Curses"};
             auto& io = Ui::GetIO();
@@ -1633,7 +1660,7 @@ static void DrawBankSort() {
             BodyText(Ui::GetWindowDrawList(),progress.c_str(),At(origin,scale,2,3),UiPoint(scale.x*.85f,scale.y*.85f));
             if (button("CancelSort","Cancel",width-108,108)) bankAction = 3;
         } else {
-            Ui::BeginDisabled(!bankFrame.available);
+            Ui::BeginDisabled(!bankFrame.available || loadoutFrame.busy || loadoutCommand.kind==LoadoutCommand::Kind::Equip);
             const float half = (width-8)*.5f;
             if (button("SortPage","Sort Page",0,half)) bankAction = 1;
             if (button("SortPages","Sort Pages",half+8,half)) bankAction = 2;
@@ -1645,21 +1672,14 @@ static void DrawBankSort() {
     Ui::End();
 }
 
+#include "loadouts_ui.h"
+
 static const char* CursorColorNames[] = {"Red","Yellow","White","Green","Cyan","Blue","Purple","Pink"};
 static const UiColor CursorColors[] = {UI_COLOR(255,32,32,255),UI_COLOR(255,220,32,255),UI_COLOR(255,255,255,255),UI_COLOR(64,255,64,255),UI_COLOR(32,230,255,255),UI_COLOR(80,128,255,255),UI_COLOR(180,80,255,255),UI_COLOR(255,80,180,255)};
 
-static void DrawCursorRing(UiPoint center,float radius,float scale,UiColor color) {
-    auto* draw = Ui::GetForegroundDrawList();
-    for (unsigned pass = 0; pass < 2; ++pass) {
-        const float width = (pass ? 2.2f : 4.5f) * scale;
-        UiPoint previous(center.x + radius,center.y);
-        for (unsigned i = 1; i <= 64; ++i) {
-            const float angle = i * 6.28318530718f / 64;
-            const UiPoint next(center.x + std::cos(angle) * radius,center.y + std::sin(angle) * radius);
-            draw->AddLine(previous,next,pass ? color : UI_COLOR(0,0,0,220),width);
-            previous = next;
-        }
-    }
+static void DrawCursorRing(UiPoint center,float radius,float scale,UiColor color,bool preview=false) {
+    auto& ring = preview ? previewCursorRing : combatCursorRing;
+    ring.Draw(graphics,Ui::GetForegroundDrawList(),center,radius,scale,color);
 }
 
 static void DrawCursorSettings(UiPoint origin,UiPoint scale) {
@@ -1672,7 +1692,7 @@ static void DrawCursorSettings(UiPoint origin,UiPoint scale) {
     if (step) draftCursorOptions.radius = static_cast<unsigned>(std::clamp(static_cast<int>(draftCursorOptions.radius) + step * 2,12,40));
     const int shade = OptionRow("Color:",CursorColorNames[draftCursorOptions.color],point(10,134),scale,"Ring color.",point(355,134),origin.x);
     if (shade) draftCursorOptions.color = (draftCursorOptions.color + (shade > 0 ? 1 : 7)) % 8;
-    DrawCursorRing(point(75,214),draftCursorOptions.radius * scale.y,scale.y,CursorColors[draftCursorOptions.color]);
+    DrawCursorRing(point(75,214),draftCursorOptions.radius * scale.y,scale.y,CursorColors[draftCursorOptions.color],true);
     BodyText(draw,"Hides after 10 seconds without damage dealt or received.",point(130,183),UiPoint(scale.x*.85f,scale.y*.85f),BodyColor,185 * scale.x);
     if (!cursorMessage.empty()) BodyText(draw,cursorMessage.c_str(),point(34,265),scale,GoldColor,282 * scale.x);
     if (DrawSkinControl("Okay",point(24,290),scale,&okayRect)) {
@@ -1682,16 +1702,14 @@ static void DrawCursorSettings(UiPoint origin,UiPoint scale) {
     if (DrawSkinControl("Back",point(185,290),scale,&cancelRect)) activeAddon = nullptr;
 }
 
-static void DrawCombatCursor() {
-    if (!addonRegistry.CombatCursor() || !cursorOptions.enabled || !worldVisible || GetTickCount64() >= cursorCombatUntil || !gameWindow || GetForegroundWindow() != gameWindow) return;
+static bool CombatCursorPosition(UiPoint& center) {
+    if (!addonRegistry.CombatCursor() || !cursorOptions.enabled || !worldVisible || GetTickCount64() >= cursorCombatUntil || !gameWindow || GetForegroundWindow() != gameWindow) return false;
     POINT pointer{};
     RECT client{};
-    if (!GetCursorPos(&pointer) || !ScreenToClient(gameWindow,&pointer) || !GetClientRect(gameWindow,&client) || !PtInRect(&client,pointer) || client.right <= 0 || client.bottom <= 0) return;
+    if (!GetCursorPos(&pointer) || !ScreenToClient(gameWindow,&pointer) || !GetClientRect(gameWindow,&client) || !PtInRect(&client,pointer) || client.right <= 0 || client.bottom <= 0) return false;
     const auto display = Ui::GetIO().DisplaySize;
-    const UiPoint center(pointer.x * display.x / client.right,pointer.y * display.y / client.bottom);
-    const float scale = GameScale().y;
-    const float radius = cursorOptions.radius * scale;
-    DrawCursorRing(center,radius,scale,CursorColors[cursorOptions.color]);
+    center = {pointer.x * display.x / client.right,pointer.y * display.y / client.bottom};
+    return true;
 }
 
 static void DrawCharacterSheet() {
@@ -2076,6 +2094,7 @@ static void DiscoverAddons(const std::filesystem::path& root) {
     if (addonRegistry.CombatCursor()) registeredAddons.push_back({"cursor-circle","Cursor Circle","Highlights the cursor during combat.",OpenCursorSettings,DrawCursorSettings,nullptr});
     if (addonRegistry.BankSort()) registeredAddons.push_back({"sort-bank-pages","Sort Bank Pages","Sort one bank page or all accessible pages.",OpenBankSettings,DrawBankSettings,nullptr});
     if (addonRegistry.MoveEverything()) registeredAddons.push_back({"moveeverything","Moveeverything","Move player, party, target, chat, minimap and buff/curse panels.",OpenMoveSettings,DrawMoveSettings,nullptr});
+    if (addonRegistry.Loadouts()) registeredAddons.push_back({"loadouts","Loadouts","Save equipment sets next to Inventory.",OpenLoadoutSettings,DrawLoadoutSettings,nullptr});
     for (const auto& extension:addonRegistry.Extensions()) registeredAddons.push_back({extension.id,extension.name,extension.description,OpenExtensionSettings,DrawExtensionSettings,&extension,addonRegistry.Settings(extension)});
 }
 
@@ -2148,6 +2167,8 @@ extern "C" __declspec(dllexport) int __cdecl MeterOverlayStart(const char* iniFi
     const auto addonsDirectory=std::filesystem::u8path(settingsFile).parent_path().parent_path();
     if (!LoadSkinData(addonsDirectory/L"Runtime"/L"ui.bin")) return 0;
     DiscoverAddons(addonsDirectory);
+    loadoutStore.Initialize(addonsDirectory/L"Loadouts");
+    loadoutFrame={}; loadoutCommand={}; loadoutOpen=loadoutEditor=loadoutDelete=loadoutRenaming=false; loadoutKeys={}; loadoutCapture=-2; loadoutArea=loadoutListButton=loadoutAddButton=loadoutNameArea={};
     cursorSettings = addonsDirectory / L"CursorCircle" / L"settings.ini";
     cursorOptions = {}; cursorCombatUntil = 0;
     { std::ifstream input(cursorSettings); cursorOptions.Load(input); }
@@ -2331,6 +2352,10 @@ extern "C" void __cdecl MeterOverlayLayer(IDirect3DDevice9* device,AddonUiLayer 
     } else if (layer == AddonUiLayer::Menu) { help.text.clear(); DrawAddons(); DrawHelp(); }
     else if (layer == AddonUiLayer::CharacterSheet) DrawCharacterSheet();
     else if (layer == AddonUiLayer::Bank) { help.text.clear(); DrawBankSort(); DrawHelp(); }
+    else if (layer == AddonUiLayer::Inventory) {
+        if (loadoutFrame.visible && addonRegistry.Loadouts()) { help.text.clear(); DrawLoadouts(); DrawHelp(); }
+        else loadoutArea=loadoutListButton=loadoutAddButton=loadoutNameArea={};
+    }
     else DrawCooldowns(now,layer);
     Ui::Flush();
     Ui::SetInputEnabled(true);
@@ -2340,9 +2365,11 @@ extern "C" void __cdecl MeterOverlayEndFrame() {
     Lock lock;
     if (context && nativeFrame) {
         Ui::SetCurrentContext(context);
-        if (graphics && worldVisible && (moveEditing || (cursorOptions.enabled && GetTickCount64() < cursorCombatUntil)) && SUCCEEDED(graphics->TestCooperativeLevel()) && SUCCEEDED(graphics->BeginScene())) {
+        UiPoint cursorCenter;
+        const bool showCursor = CombatCursorPosition(cursorCenter);
+        if (graphics && worldVisible && (moveEditing || showCursor) && SUCCEEDED(graphics->TestCooperativeLevel()) && SUCCEEDED(graphics->BeginScene())) {
             DrawMoveEditor();
-            DrawCombatCursor();
+            if (showCursor) { const float scale = GameScale().y; DrawCursorRing(cursorCenter,cursorOptions.radius*scale,scale,CursorColors[cursorOptions.color]); }
             Ui::Flush();
             graphics->EndScene();
         }
@@ -2358,7 +2385,7 @@ extern "C" __declspec(dllexport) void __cdecl MeterOverlayRender(IDirect3DDevice
     Lock lock;
     if (shuttingDown) { ShutdownUnlocked(); InterlockedExchange(&stopped,1); return; }
     if (!device || !worldVisible || FAILED(device->BeginScene())) return;
-    for (auto layer : {AddonUiLayer::Meter,AddonUiLayer::Hotbar,AddonUiLayer::Effects,AddonUiLayer::CharacterSheet,AddonUiLayer::Bank,AddonUiLayer::Menu}) MeterOverlayLayer(device,layer);
+    for (auto layer : {AddonUiLayer::Meter,AddonUiLayer::Hotbar,AddonUiLayer::Effects,AddonUiLayer::CharacterSheet,AddonUiLayer::Bank,AddonUiLayer::Inventory,AddonUiLayer::Menu}) MeterOverlayLayer(device,layer);
     device->EndScene();
     MeterOverlayEndFrame();
 }

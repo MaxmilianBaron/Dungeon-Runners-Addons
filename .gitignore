@@ -34,3 +34,5 @@ backups/
 custom.audio
 cooldowns.dat*
 settings.ini.pending
+*.loadouts
+*.loadouts.pending

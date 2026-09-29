@@ -21,6 +21,7 @@
 #include "native_catalog.generated.h"
 #include "combat_cursor.h"
 #include "native_bank_sort.h"
+#include "native_loadouts.h"
 #include "native_move_layout.h"
 #include "move_projection.h"
 
@@ -56,6 +57,8 @@ extern "C" void __cdecl MeterOverlayCursorCombat(uint64_t);
 extern "C" bool __cdecl MeterOverlayBankSettings(const BankSortFrame*,unsigned*,bool*);
 extern "C" bool __cdecl MeterOverlayMoveSettings(MoveLayoutSettings*,const MoveLayoutFrame*);
 extern "C" void __cdecl MeterOverlayBankInputTest(AddonInputTest);
+extern "C" bool __cdecl MeterOverlayLoadouts(const LoadoutFrame*,LoadoutCommand*,bool*);
+extern "C" void __cdecl MeterOverlayLoadoutInputTest(AddonInputTest);
 
 static INIT_ONCE bootstrap = INIT_ONCE_STATIC_INIT;
 static volatile LONG ready = 0;
@@ -65,6 +68,7 @@ static std::recursive_mutex stateGate;
 static NativeMeter meter;
 static CursorCombat cursorCombat;
 static NativeBankSort bankSort;
+static NativeLoadouts loadouts;
 static NativeMoveLayout moveLayout;
 static MeterPacket snapshot{};
 static DungeonHistory history;
@@ -156,6 +160,7 @@ static void Fault(const char* text) {
     cursorCombat.Reset();
     MeterOverlayCursorCombat(0);
     bankSort.Reset();
+    loadouts.Reset();
     history.Pause(true);
     InterlockedExchange(&collecting, 0);
     nextSnapshot = 0;
@@ -377,7 +382,7 @@ static bool PanelInput(float x,float y,unsigned offset,bool background,bool clos
     bool close = false;
     for (unsigned depth = 0; node && depth < 24; ++depth) {
         if (node == sheet) return !closeOnly || close;
-        if (closeOnly) { const auto name = reader.String(node+0x10,96); close = close || name == "Close" || name == "Cancel"; }
+        if (closeOnly) { const auto name = reader.String(node+0x10,96); close = close || name == "Close" || name == "Cancel" || name == "CloseBox"; }
         node = reader.Pointer(node + 0x14);
     }
     return false;
@@ -385,6 +390,7 @@ static bool PanelInput(float x,float y,unsigned offset,bool background,bool clos
 
 static bool CharacterInput(float x,float y,bool) { return PanelInput(x,y,0x270,false); }
 static bool BankInput(float x,float y,bool closeOnly) { return PanelInput(x,y,0x23c,true,closeOnly); }
+static bool LoadoutInput(float x,float y,bool closeOnly) { return PanelInput(x,y,0x230,true,closeOnly); }
 
 static void EnablePlayerPlate(uintptr_t stack) {
     __try {
@@ -440,8 +446,18 @@ static void RefreshUi(const NativeReader& reader) {
     unsigned bankAction = 0;
     bool bankFocused = false;
     const bool bankEnabled = MeterOverlayBankSettings(nullptr,&bankAction,&bankFocused);
+    if (loadouts.Frame().busy && bankAction!=3) bankAction=0;
     bankSort.Service(reader,image,bankEnabled,bankAction,bankFocused,now);
     MeterOverlayBankSettings(&bankSort.Frame(),nullptr,nullptr);
+    LoadoutCommand loadoutAction;
+    bool loadoutFocused=false;
+    const bool loadoutEnabled=MeterOverlayLoadouts(nullptr,&loadoutAction,&loadoutFocused);
+    loadouts.Service(reader,image,loadoutEnabled,loadoutAction,loadoutFocused,bankSort.Frame().busy,now);
+    if (loadouts.TakeBankSortRequest() && bankEnabled && bankFocused && loadoutFocused) {
+        bankSort.Service(reader,image,true,2,true,now);
+        MeterOverlayBankSettings(&bankSort.Frame(),nullptr,nullptr);
+    }
+    MeterOverlayLoadouts(&loadouts.Frame(),nullptr,nullptr);
     MythicSettings soundSettings;
     unsigned previewVolume = 100;
     HWND browse = nullptr;
@@ -600,6 +616,7 @@ static void Observe(unsigned kind, const HookRegisters& registers) {
         cursorCombat.Reset();
         MeterOverlayCursorCombat(0);
         bankSort.Reset();
+        loadouts.Reset();
         meter.Zone();
         history.LeaveZone();
         inWorld = false;
@@ -648,6 +665,7 @@ static void Observe(unsigned kind, const HookRegisters& registers) {
         else if (registers.edi == reader.Pointer(ui + 0x1dc)) layer = AddonUiLayer::Menu;
         else if (registers.edi == reader.Pointer(ui + 0x270)) layer = AddonUiLayer::CharacterSheet;
         else if (registers.edi == reader.Pointer(ui + 0x23c)) layer = AddonUiLayer::Bank;
+        else if (registers.edi == reader.Pointer(ui + 0x230)) layer = AddonUiLayer::Inventory;
         else return;
         if (!reader.InWorld()) return;
         if (layer == AddonUiLayer::CharacterSheet) {
@@ -762,6 +780,7 @@ static BOOL CALLBACK InitializeAddon(PINIT_ONCE, PVOID, PVOID*) {
         MeterOverlayHotkeyTest(OverlayHotkey);
         MeterOverlayCharacterInputTest(CharacterInput);
         MeterOverlayBankInputTest(BankInput);
+        MeterOverlayLoadoutInputTest(LoadoutInput);
         InterlockedExchange(&nameplateMask,static_cast<LONG>(MeterOverlayNameplates()));
         if (!InstallHooks()) throw std::runtime_error("Native hook validation failed; addon disabled");
         std::ofstream output(status, std::ios::trunc);
