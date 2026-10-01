@@ -234,8 +234,10 @@ public:
         if (Pointer(Pointer(frame) + 0xb8) != image + 0x280100) return 0;
         return frame;
     }
-    bool Menu(std::array<float, 4>& bounds, bool (*layout)(uintptr_t, uintptr_t, uintptr_t) = nullptr) const {
+    bool Menu(std::array<float, 4>& bounds, bool (*layout)(uintptr_t, uintptr_t, uintptr_t) = nullptr, unsigned rows = 1) const {
         bounds = {};
+        if (rows<1 || rows>2) return false;
+        const int32_t extra=static_cast<int32_t>(rows)*39;
         const uintptr_t ui = Pointer(image + 0x5314b0);
         const uintptr_t menu = ui ? Pointer(ui + 0x1dc) : 0;
         uint32_t flags = 0;
@@ -261,13 +263,13 @@ public:
         int32_t menuHeight = 0, frameHeight = 0, backY = 0;
         if (!Read(menu + 0xfc, menuHeight) || !Read(frame + 0xfc, frameHeight) || !Read(back + 0xf4, backY)) return false;
         if (menuHeight == 240 && frameHeight == 240 && backY == 191 && b[2] == 141 && b[3] == 39) {
-            if (b[1] - a[1] - a[3] != 17 || b[1] + b[3] + 39 > height) return false;
+            if (b[1] - a[1] - a[3] != 17 || b[1] + b[3] + extra > height) return false;
             if (layout) layout(menu, frame, back);
             return false;
         }
-        if (menuHeight != 279 || frameHeight != 279 || backY != 230 || b[2] != 141 || b[3] != 39 || b[1] + b[3] > height) return false;
+        if (menuHeight != 240+extra || frameHeight != 240+extra || backY != 191+extra || b[2] != 141 || b[3] != 39 || b[1] + b[3] > height) return false;
         const int64_t gap = b[1] - a[1] - a[3];
-        if (gap != 56) return false;
+        if (gap != 17+extra) return false;
         bounds = {static_cast<float>(b[0]) / width, static_cast<float>(a[1] + a[3]) / height, static_cast<float>(b[2]) / width, static_cast<float>(b[3]) / height};
         for (float value : bounds) if (value < 0 || value > 1) { bounds = {}; return false; }
         if (bounds[0] + bounds[2] > 1 || bounds[1] + bounds[3] > 1) { bounds = {}; return false; }

@@ -27,6 +27,7 @@
 - **Cursor Circle** — Highlights your cursor during combat, with adjustable size and color.
 - **Sort Bank Pages** — Sort one bank page or all unlocked pages by item type, appearance and armor set.
 - **Loadouts** — Save equipped gear and switch sets from Inventory or an open bank.
+- **Leaderboard** — Official Level 100, Gold, Time and PvP rankings via `ESC` → `Leaderboard`.
 
 <details>
 <summary>Mac / Linux setup</summary>

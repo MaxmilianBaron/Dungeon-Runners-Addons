@@ -37,6 +37,7 @@ extern "C" void __cdecl MeterOverlayInvalidate();
 extern "C" unsigned __cdecl MeterOverlayStatus();
 extern "C" bool __cdecl MeterOverlayEnabled();
 extern "C" bool __cdecl MeterOverlayAddonsOpen();
+extern "C" bool __cdecl MeterOverlayLeaderboardEnabled();
 extern "C" void __cdecl MeterOverlayWorld(bool);
 extern "C" bool __cdecl MeterOverlayHideGold();
 extern "C" unsigned __cdecl MeterOverlayNameplates();
@@ -173,7 +174,8 @@ static bool ExpandMenu(uintptr_t menu, uintptr_t frame, uintptr_t back) {
     if (reader.Pointer(reader.Pointer(menu) + 0xac) != size || reader.Pointer(reader.Pointer(frame) + 0xac) != size || reader.Pointer(reader.Pointer(back) + 0xa4) != location) return false;
     int32_t menuWidth = 0, frameWidth = 0, backX = 0;
     if (!reader.Read(menu + 0xf8, menuWidth) || !reader.Read(frame + 0xf8, frameWidth) || !reader.Read(back + 0xf0, backX) || menuWidth != 172 || frameWidth != 172 || backX != 15) return false;
-    const int32_t dimension[] = {172,279}, point[] = {15,230};
+    const int32_t extra = MeterOverlayLeaderboardEnabled() ? 39 : 0;
+    const int32_t dimension[] = {172,279+extra}, point[] = {15,230+extra};
     using Setter = void (__thiscall*)(void*, const int32_t*, bool);
     reinterpret_cast<Setter>(size)(reinterpret_cast<void*>(menu), dimension, true);
     reinterpret_cast<Setter>(size)(reinterpret_cast<void*>(frame), dimension, true);
@@ -531,7 +533,7 @@ static void RefreshUi(const NativeReader& reader) {
     MeterOverlayCooldowns(&cooldowns);
     if (updated) MeterOverlayUpdate(&snapshot, sizeof(snapshot));
     std::array<float, 4> rect{};
-    if (shown) reader.Menu(rect, ExpandMenu);
+    if (shown) reader.Menu(rect, ExpandMenu, MeterOverlayLeaderboardEnabled() ? 2 : 1);
     MeterOverlayMenu(rect[0], rect[1], rect[2], rect[3]);
 }
 

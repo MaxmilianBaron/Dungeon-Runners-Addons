@@ -29,6 +29,7 @@
 #include "move_layout.h"
 #include "loadouts_store.h"
 #include "loadout_name.h"
+#include "leaderboard_client.h"
 
 
 
@@ -63,6 +64,14 @@ static unsigned nativeLayers = 0;
 static AddonInputTest nativeInputTest = nullptr;
 static AddonHotkeyTest nativeHotkeyTest = nullptr;
 static bool addonsOpen = false;
+static bool leaderboardOpen=false, leaderboardWeek=false;
+static std::unique_ptr<Leaderboard::Client> leaderboardClient;
+static Leaderboard::Category leaderboardCategory=Leaderboard::Category::Level, leaderboardViewCategory=Leaderboard::Category::Level;
+static std::shared_ptr<const Leaderboard::Board> leaderboardBoard;
+static std::vector<Leaderboard::Row> leaderboardRows;
+static size_t leaderboardPage=0;
+static RECT leaderboardArea{}, leaderboardButtonRect{}, leaderboardCloseRect{}, leaderboardRefreshRect{}, leaderboardPreviousRect{}, leaderboardNextRect{}, leaderboardPeriodRect{};
+static std::array<RECT,5> leaderboardTabRects{};
 static bool goldHidden = true, draftGoldHidden = true;
 static bool cooldownsEnabled = true, draftCooldownsEnabled = true;
 static bool cooldownTenths = true, draftCooldownTenths = true;
@@ -450,9 +459,10 @@ static LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wparam
         }
         if (context && !shuttingDown && worldVisible && !consume && !nativeBankClose) {
             Ui::SetCurrentContext(context);
-            if (message == WM_KEYDOWN && wparam == VK_ESCAPE && (panelOptionsOpen || addonsOpen || reportOpen || historyOpen || (visible && selectedCharacter) || consumeEscapeUp)) {
+            if (message == WM_KEYDOWN && wparam == VK_ESCAPE && (leaderboardOpen || panelOptionsOpen || addonsOpen || reportOpen || historyOpen || (visible && selectedCharacter) || consumeEscapeUp)) {
                 if (!(lparam & (1LL << 30)) && !consumeEscapeUp) {
-                    if (reportOpen) reportOpen = false;
+                    if (leaderboardOpen) { leaderboardOpen=false; Ui::ClearInput(); }
+                    else if (reportOpen) reportOpen = false;
                     else if (addonsOpen) BackFromAddons();
                     else if (selectedCharacter && (visible || historyOpen)) BackFromDetails();
                     else if (historyOpen) { if (historySelected) historySelected=0; else historyOpen=false; }
@@ -474,7 +484,7 @@ static LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wparam
                 }
                 const POINT pointer{GET_X_LPARAM(position),GET_Y_LPARAM(position)};
                 const bool mouse = message >= WM_MOUSEFIRST && message <= WM_MOUSELAST;
-                const bool allowed = !mouse || InputAllowed({static_cast<float>(pointer.x),static_cast<float>(pointer.y)},addonsOpen || PtInRect(&addonsButtonRect,pointer));
+                const bool allowed = !mouse || InputAllowed({static_cast<float>(pointer.x),static_cast<float>(pointer.y)},addonsOpen || leaderboardOpen || PtInRect(&addonsButtonRect,pointer) || PtInRect(&leaderboardButtonRect,pointer));
                 if (!allowed) { Ui::ClearInput(); dragging = false; EndPanelResize(); }
                 const bool dismissOptions = allowed && down && panelOptionsOpen && !PtInRect(&panelArea,pointer);
                 if (dismissOptions) { panelOptionsOpen = false; dragging = true; Ui::ClearInput(); }
@@ -515,6 +525,7 @@ static void ShutdownUnlocked() {
     hitCount = 0;
     dragging = false;
     addonsOpen = false;
+    leaderboardOpen=false; leaderboardArea=leaderboardButtonRect={};
     panelOptionsOpen = false;
 }
 
@@ -2121,6 +2132,8 @@ static void DrawLibrary(UiPoint origin,UiPoint scale,float listHeight) {
     if (Ui::IsItemHovered()) QueueHelp("Returns to the game's Escape menu.",point(355,68+listHeight),scale,origin.x);
 }
 
+#include "leaderboard_ui.h"
+
 static void DrawAddons() {
     if (moveEditing) return;
     const UiPoint display = Ui::GetIO().DisplaySize;
@@ -2129,7 +2142,7 @@ static void DrawAddons() {
     const UiPoint size(menuBounds[2]*display.x,menuBounds[3]*display.y);
     const UiPoint buttonScale(size.x/141,size.y/39);
     const int flags = SurfaceFlags | Ui::NoSavedSettings;
-    if (!addonsOpen) {
+    if (!addonsOpen && !leaderboardOpen) {
         Ui::SetNextWindowPos(position);
         Ui::SetNextWindowSize(size);
         if (Ui::Begin("##EscapeAddons",nullptr,flags)) {
@@ -2137,6 +2150,16 @@ static void DrawAddons() {
             RegisterHitArea();
         }
         Ui::End();
+        leaderboardButtonRect={};
+        if (addonRegistry.Leaderboard()) {
+            const UiPoint next(position.x,position.y+size.y);
+            Ui::SetNextWindowPos(next); Ui::SetNextWindowSize(size);
+            if (Ui::Begin("##EscapeLeaderboard",nullptr,flags)) {
+                if (DrawSkinControl("Leaderboard",next,buttonScale,&leaderboardButtonRect)) OpenLeaderboard();
+                RegisterHitArea();
+            }
+            Ui::End();
+        }
     }
     if (addonsOpen) {
         const float listHeight = std::clamp(static_cast<float>(registeredAddons.size())*48,48.0f,192.0f);
@@ -2167,6 +2190,9 @@ extern "C" __declspec(dllexport) int __cdecl MeterOverlayStart(const char* iniFi
     const auto addonsDirectory=std::filesystem::u8path(settingsFile).parent_path().parent_path();
     if (!LoadSkinData(addonsDirectory/L"Runtime"/L"ui.bin")) return 0;
     DiscoverAddons(addonsDirectory);
+    leaderboardClient=addonRegistry.Leaderboard() ? std::make_unique<Leaderboard::Client>() : nullptr;
+    leaderboardOpen=leaderboardWeek=false; leaderboardCategory=Leaderboard::Category::Level; leaderboardBoard.reset(); leaderboardRows.clear(); leaderboardPage=0;
+    leaderboardArea=leaderboardButtonRect={};
     loadoutStore.Initialize(addonsDirectory/L"Loadouts");
     loadoutFrame={}; loadoutCommand={}; loadoutOpen=loadoutEditor=loadoutDelete=loadoutRenaming=false; loadoutKeys={}; loadoutCapture=-2; loadoutArea=loadoutListButton=loadoutAddButton=loadoutNameArea={};
     cursorSettings = addonsDirectory / L"CursorCircle" / L"settings.ini";
@@ -2284,6 +2310,7 @@ extern "C" __declspec(dllexport) void __cdecl MeterOverlayMenu(float x, float y,
         x < 0 || y < 0 || width <= 0 || height <= 0 || x + width > 1 || y + height > 1) {
         std::fill(std::begin(menuBounds), std::end(menuBounds), 0.0f);
         addonsOpen = false;
+        leaderboardOpen=false; leaderboardArea=leaderboardButtonRect={};
         moveEditing = false; moveSelected = -1;
         activeAddon = nullptr;
         addonsButtonRect = {};
@@ -2349,7 +2376,7 @@ extern "C" void __cdecl MeterOverlayLayer(IDirect3DDevice9* device,AddonUiLayer 
         DrawHistory();
         DrawReport();
         DrawHelp();
-    } else if (layer == AddonUiLayer::Menu) { help.text.clear(); DrawAddons(); DrawHelp(); }
+    } else if (layer == AddonUiLayer::Menu) { help.text.clear(); DrawAddons(); DrawLeaderboard(); DrawHelp(); }
     else if (layer == AddonUiLayer::CharacterSheet) DrawCharacterSheet();
     else if (layer == AddonUiLayer::Bank) { help.text.clear(); DrawBankSort(); DrawHelp(); }
     else if (layer == AddonUiLayer::Inventory) {
@@ -2410,8 +2437,10 @@ extern "C" bool __cdecl MeterOverlayMoveSettings(MoveLayoutSettings* settings,co
 
 extern "C" bool __cdecl MeterOverlayAddonsOpen() {
     Lock lock;
-    return addonsOpen;
+    return addonsOpen || leaderboardOpen;
 }
+
+extern "C" bool __cdecl MeterOverlayLeaderboardEnabled() { Lock lock; return addonRegistry.Leaderboard(); }
 
 extern "C" bool __cdecl MeterOverlayHideGold() { Lock lock; return addonRegistry.Money() && goldHidden; }
 extern "C" void __cdecl MeterOverlayCharacterInputTest(AddonInputTest test) { Lock lock; characterInputTest = test; }
@@ -2528,6 +2557,7 @@ extern "C" __declspec(dllexport) void __cdecl MeterOverlayWorld(bool shown) {
         hotkeyInput.recording=false; hotkeyMessage.clear();
         EndPanelResize(); hitCount = 0; dragging = false; wellTimerArea = {};
         addonsOpen = historyOpen = panelOptionsOpen = false;
+        leaderboardOpen=false; leaderboardArea=leaderboardButtonRect={};
         moveEditing = false; moveSelected = -1; moveFrame = {};
         activeAddon = nullptr; addonsButtonRect = {}; consumeEscapeUp = false;
         selectedCharacter = 0; selectedPet = 0;
@@ -2545,6 +2575,8 @@ extern "C" __declspec(dllexport) void __cdecl MeterOverlayInvalidate() {
 
 extern "C" __declspec(dllexport) void __cdecl MeterOverlayStop() {
     Lock lock;
+    if (leaderboardClient) leaderboardClient->Stop();
+    leaderboardOpen=false; leaderboardArea=leaderboardButtonRect={};
     EndPanelResize();
     shuttingDown = true;
     visible = false;
