@@ -9,7 +9,7 @@
 #include <fstream>
 #include <sstream>
 #include <string>
-#include "ui.h"
+#include "AardvarkUI/ui.h"
 #include "overlay_protocol.h"
 #include "addon_features.h"
 #include "native_history.h"

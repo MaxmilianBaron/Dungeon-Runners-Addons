@@ -5,7 +5,7 @@
 #include <fstream>
 #include <mutex>
 #include <stdexcept>
-#include "native_patch.h"
+#include "AardvarkHook/patch.h"
 #include "native_reader.h"
 #include "native_nameplates.h"
 #include "native_hotkeys.h"

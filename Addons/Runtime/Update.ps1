@@ -76,8 +76,8 @@ function Invoke-AddonUpdate([string]$Game) {
         $metadata = Get-Content -LiteralPath (Get-UpdatePath $stage 'Addons/Runtime/ui-resources.json') -Raw | ConvertFrom-Json
         $cache = Get-UpdatePath $Game 'Addons/Runtime/ui.bin'
         $cacheValid = (Test-Path -LiteralPath $cache) -and (Get-FileHash -LiteralPath $cache -Algorithm SHA256).Hash.ToLowerInvariant() -ceq $metadata.sha256
-        $licensePath = Get-UpdatePath $Game 'Addons/Licenses/LICENSE.txt'
-        $licensePresent = Test-Path -LiteralPath $licensePath -PathType Leaf
+        $licensePaths = @('LICENSE.txt','AardvarkUI-LICENSE.txt','AardvarkHook-LICENSE.txt','AardvarkAudio-LICENSE.txt') | ForEach-Object { Get-UpdatePath $Game ('Addons/Licenses/'+$_) }
+        $licensePresent = -not @($licensePaths | Where-Object { -not (Test-Path -LiteralPath $_ -PathType Leaf) }).Count
         $installer = Get-UpdatePath $stage 'Install.ps1'
         Receive-UpdateAsset $release 'Install.ps1' $installer $manifest.installerSha256
         . $installer
@@ -86,7 +86,7 @@ function Invoke-AddonUpdate([string]$Game) {
             if ((Get-FileHash -LiteralPath (Get-UpdatePath $Game $file.path) -Algorithm SHA256).Hash.ToLowerInvariant() -cne $file.sha256) { throw ('Installed file failed verification: '+$file.path) }
         }
         if ((Get-FileHash -LiteralPath $cache -Algorithm SHA256).Hash.ToLowerInvariant() -cne $metadata.sha256) { throw 'Installed UI cache failed verification.' }
-        if (-not (Test-Path -LiteralPath $licensePath -PathType Leaf)) { throw 'The addon license is missing.' }
+        if (@($licensePaths | Where-Object { -not (Test-Path -LiteralPath $_ -PathType Leaf) }).Count) { throw 'An addon license is missing.' }
         if (-not $licensePresent -and -not $downloads -and $cacheValid) { return ('Updated '+$release.tag_name+'; added the addon license. Existing files were preserved.') }
         if (-not $downloads -and $cacheValid) { return ('Version '+$release.tag_name+' is already installed.') }
         return ('Updated to '+$release.tag_name+'; '+$downloads+' changed files downloaded. Settings and history were preserved.')

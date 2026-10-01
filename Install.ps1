@@ -1,6 +1,11 @@
 param([string]$ClientDirectory = '', [switch]$Interactive)
 $ErrorActionPreference = 'Stop'
 
+function Get-AddonLicensePaths {
+    @('Addons/Licenses/LICENSE.txt','Addons/Licenses/AardvarkUI-LICENSE.txt',
+      'Addons/Licenses/AardvarkHook-LICENSE.txt','Addons/Licenses/AardvarkAudio-LICENSE.txt')
+}
+
 function Get-AddonLicenseBytes {
     $text = @'
 MIT License
@@ -132,10 +137,10 @@ function Get-CompletedAddonBackup([string]$Game,[string]$Name) {
     $stat = Get-Item -LiteralPath $record -Force
     if ($stat.PSIsContainer -or $stat.Length -gt 65536) { throw 'Unknown backup metadata.' }
     $metadata = Get-Content -LiteralPath $record -Raw | ConvertFrom-Json
-    if ($metadata.version -isnot [string] -or $metadata.version -cnotmatch '^[0-9][A-Za-z0-9._-]{0,63}$' -or $metadata.files -isnot [array] -or $metadata.files.Count -gt 67) { throw 'Unknown backup file list.' }
-    $allowed = @('Addons/Licenses/LICENSE.txt','d3d9.dll','d3d9.previous.dll','Addons/Update.cmd','Addons/Update.sh','Addons/Update.command',
+    if ($metadata.version -isnot [string] -or $metadata.version -cnotmatch '^[0-9][A-Za-z0-9._-]{0,63}$' -or $metadata.files -isnot [array] -or $metadata.files.Count -gt 70) { throw 'Unknown backup file list.' }
+    $allowed = @(Get-AddonLicensePaths) + @('d3d9.dll','d3d9.previous.dll','Addons/Update.cmd','Addons/Update.sh','Addons/Update.command',
         'Addons/Runtime/Addons.dll','Addons/Runtime/ui.bin','Addons/Runtime/ui-resources.json','Addons/Runtime/Update.ps1','Addons/Runtime/macOS.py',
-        'Addons/DamageMeter/DamageMeter.dll','Addons/DamageMeter/Dear-ImGui-LICENSE.txt','Addons/DamageMeter/MinHook-LICENSE.txt')
+        'Addons/DamageMeter/DamageMeter.dll')
     $expected = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     $directories = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
@@ -217,12 +222,14 @@ function Install-Addons([string]$Game,[string]$Package) {
     if (-not (Test-Path -LiteralPath $exe)) { throw 'Choose the folder containing DungeonRunners.exe.' }
     $clientHash = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash.ToLowerInvariant()
     if ($clientHash -notin $manifest.clients) { throw 'This client version is not supported. No files were changed.' }
-    $licenseRelative = 'Addons/Licenses/LICENSE.txt'
-    $licensePath = Get-ChildPath $Game $licenseRelative
-    if ((Test-Path -LiteralPath $licensePath) -and -not (Test-Path -LiteralPath $licensePath -PathType Leaf)) { throw 'The addon license target is a directory.' }
+    $licenseRelatives = @(Get-AddonLicensePaths)
+    foreach ($relative in $licenseRelatives) {
+        $licensePath = Get-ChildPath $Game $relative
+        if ((Test-Path -LiteralPath $licensePath) -and -not (Test-Path -LiteralPath $licensePath -PathType Leaf)) { throw 'The addon license target is a directory.' }
+    }
     $paths = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
     foreach ($file in $manifest.files) {
-        if ($file.path -eq $licenseRelative) { throw 'The addon license is managed separately from package files.' }
+        if ($file.path -in $licenseRelatives) { throw 'The addon licenses are managed separately from package files.' }
         if ($file.path -notin @('d3d9.dll','Addons/Update.cmd','Addons/Runtime/Update.ps1') -and $file.path -notmatch '^Addons/[A-Za-z0-9_-]+/(?:[A-Za-z0-9_.-]+\.(?:dll|txt|md|json)|addon\.ini)$') { throw 'The package contains an unsupported installation target.' }
         if (-not $paths.Add($file.path)) { throw 'Duplicate package file.' }
         $source = Get-ChildPath $Package $file.path
@@ -252,7 +259,9 @@ function Install-Addons([string]$Game,[string]$Package) {
     $metadata = Get-Content -LiteralPath (Join-Path $Package 'Addons\Runtime\ui-resources.json') -Raw | ConvertFrom-Json
     $ui = New-LocalUiCache $Game $metadata
     $localFiles['Addons/Runtime/ui.bin'] = $ui
-    if (-not (Test-Path -LiteralPath $licensePath)) { $localFiles[$licenseRelative] = Get-AddonLicenseBytes }
+    foreach ($relative in $licenseRelatives) {
+        if (-not (Test-Path -LiteralPath (Get-ChildPath $Game $relative))) { $localFiles[$relative] = Get-AddonLicenseBytes }
+    }
     $identity = [DateTime]::UtcNow.ToString('yyyyMMdd-HHmmss')+'-'+[Guid]::NewGuid().ToString('N').Substring(0,8)
     $backupRoot = Get-ChildPath $Game ('Addons\Backups\'+$identity)
     $pendingRoot = Get-ChildPath $Game ('Addons\Runtime\.install-'+$identity)
@@ -271,7 +280,7 @@ function Install-Addons([string]$Game,[string]$Package) {
         foreach ($file in $files) {
             $destination = Get-ChildPath $Game $file.path
             $expected = $file.sha256
-            if ($file.path -eq $licenseRelative -and (Test-Path -LiteralPath $destination)) {
+            if ($file.path -in $licenseRelatives -and (Test-Path -LiteralPath $destination)) {
                 if (-not (Test-Path -LiteralPath $destination -PathType Leaf)) { throw 'The addon license target is a directory.' }
                 continue
             }
@@ -285,8 +294,8 @@ function Install-Addons([string]$Game,[string]$Package) {
             if (Get-Process -Name DungeonRunners,DungeonRunners118 -ErrorAction SilentlyContinue) { throw 'Close Dungeon Runners before installing or updating addons.' }
             if ($file.path -eq 'd3d9.dll' -and $loaderHash -and (Get-FileHash -LiteralPath $loader).Hash.ToLowerInvariant() -ne $loaderHash) { throw 'The existing d3d9.dll changed during installation.' }
             $existed = Test-Path -LiteralPath $destination
-            if ($existed -and $file.path -eq $licenseRelative) {
-                $null = Get-ChildPath $Game $licenseRelative
+            if ($existed -and $file.path -in $licenseRelatives) {
+                $null = Get-ChildPath $Game $file.path
                 if (-not (Test-Path -LiteralPath $destination -PathType Leaf)) { throw 'The addon license target is a directory.' }
                 continue
             }
@@ -297,8 +306,9 @@ function Install-Addons([string]$Game,[string]$Package) {
             $changed.Add([pscustomobject]@{destination=$destination; backup=$backup; existed=$existed})
         }
         foreach ($file in $files) {
-            if ($file.path -eq $licenseRelative -and -not @($changed | Where-Object destination -eq $licensePath).Count) {
-                if (-not (Test-Path -LiteralPath (Get-ChildPath $Game $licenseRelative) -PathType Leaf)) { throw 'The addon license is missing.' }
+            $target = Get-ChildPath $Game $file.path
+            if ($file.path -in $licenseRelatives -and -not @($changed | Where-Object destination -eq $target).Count) {
+                if (-not (Test-Path -LiteralPath $target -PathType Leaf)) { throw 'The addon license is missing.' }
                 continue
             }
             if ((Get-FileHash -LiteralPath (Get-ChildPath $Game $file.path)).Hash.ToLowerInvariant() -ne $file.sha256) { throw 'Installed file verification failed.' }

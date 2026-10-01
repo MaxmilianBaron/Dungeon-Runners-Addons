@@ -34,6 +34,8 @@ FILES = {
     'Addons/Update.sh',
 }
 LICENSE_PATH = 'Addons/Licenses/LICENSE.txt'
+LICENSE_PATHS = (LICENSE_PATH, 'Addons/Licenses/AardvarkUI-LICENSE.txt',
+                 'Addons/Licenses/AardvarkHook-LICENSE.txt', 'Addons/Licenses/AardvarkAudio-LICENSE.txt')
 LICENSE_TEXT = '''MIT License
 
 Copyright (c) 2026 MaxmilianBaron
@@ -405,12 +407,11 @@ def completed_backup(game, name):
     require(isinstance(metadata, dict) and isinstance(metadata.get('version'), str) and
             re.fullmatch(r'[0-9][A-Za-z0-9._-]{0,63}', metadata['version']), 'Unknown backup version.')
     entries = metadata.get('files')
-    require(isinstance(entries, list) and len(entries) <= 67, 'Unknown backup file list.')
-    allowed = {LICENSE_PATH, 'd3d9.dll', 'd3d9.previous.dll', 'Addons/Update.sh', 'Addons/Update.command',
+    require(isinstance(entries, list) and len(entries) <= 70, 'Unknown backup file list.')
+    allowed = {*LICENSE_PATHS, 'd3d9.dll', 'd3d9.previous.dll', 'Addons/Update.sh', 'Addons/Update.command',
                'Addons/Update.cmd', 'Addons/Runtime/Addons.dll', 'Addons/Runtime/ui.bin',
                'Addons/Runtime/ui-resources.json', 'Addons/Runtime/Update.ps1', 'Addons/Runtime/macOS.py',
-               'Addons/DamageMeter/DamageMeter.dll', 'Addons/DamageMeter/Dear-ImGui-LICENSE.txt',
-               'Addons/DamageMeter/MinHook-LICENSE.txt'}
+               'Addons/DamageMeter/DamageMeter.dll'}
     expected = {'installation.json'}
     directories = {''}
     for relative in entries:
@@ -488,10 +489,11 @@ def install(game, package, manifest, check_running=game_stopped):
     metadata = read_json(child(package, 'Addons/Runtime/ui-resources.json'))
     cache = local_cache(game, metadata)
     local_files = {'Addons/Runtime/ui.bin': cache}
-    license_path = child(game, LICENSE_PATH)
-    require(not license_path.exists() or license_path.is_file(), 'The addon license target is a directory.')
-    if not license_path.exists():
-        local_files[LICENSE_PATH] = LICENSE_TEXT.encode('utf-8')
+    for relative in LICENSE_PATHS:
+        license_path = child(game, relative)
+        require(not license_path.exists() or license_path.is_file(), 'The addon license target is a directory.')
+        if not license_path.exists():
+            local_files[relative] = LICENSE_TEXT.encode('utf-8')
     loader, preserved = child(game, 'd3d9.dll'), child(game, 'd3d9.previous.dll')
     loader_hash = file_hash(loader) if loader.is_file() else None
     if loader_hash in manifest.get('chainLoaders', []):
@@ -522,7 +524,7 @@ def install(game, package, manifest, check_running=game_stopped):
         for item in ordered:
             relative = item['path']
             target = child(game, relative)
-            if relative == LICENSE_PATH and target.exists():
+            if relative in LICENSE_PATHS and target.exists():
                 require(target.is_file(), 'The addon license target is a directory.')
                 continue
             if target.is_file() and file_hash(target) == item['sha256']:
@@ -540,7 +542,7 @@ def install(game, package, manifest, check_running=game_stopped):
             require(file_hash(staged) == item['sha256'], 'An installation file changed while being staged.')
             staged.chmod(0o755 if relative.endswith('.sh') else 0o644)
             exists = target.exists()
-            if relative == LICENSE_PATH and exists:
+            if relative in LICENSE_PATHS and exists:
                 require(child(game, relative).is_file(), 'The addon license target is a directory.')
                 continue
             if exists:
@@ -549,7 +551,7 @@ def install(game, package, manifest, check_running=game_stopped):
             check_running()
             if relative == 'd3d9.dll' and loader_hash:
                 require(file_hash(loader) == loader_hash, 'The existing d3d9.dll changed during installation.')
-            if relative == LICENSE_PATH:
+            if relative in LICENSE_PATHS:
                 try:
                     with target.open('xb') as output:
                         changed.append((relative, False))
@@ -561,8 +563,8 @@ def install(game, package, manifest, check_running=game_stopped):
             changed.append((relative, exists))
         check_running()
         for item in ordered:
-            if item['path'] == LICENSE_PATH and (LICENSE_PATH, False) not in changed:
-                require(child(game, LICENSE_PATH).is_file(), 'The addon license is missing.')
+            if item['path'] in LICENSE_PATHS and (item['path'], False) not in changed:
+                require(child(game, item['path']).is_file(), 'The addon license is missing.')
                 continue
             require(file_hash(child(game, item['path'])) == item['sha256'], 'Installed file verification failed.')
         (backup / 'installation.json').write_text(json.dumps({

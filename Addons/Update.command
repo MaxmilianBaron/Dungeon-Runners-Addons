@@ -11,6 +11,8 @@ var requiredFiles = ['d3d9.dll', 'Addons/Runtime/Addons.dll', 'Addons/Runtime/ui
     'Addons/DamageMeter/addon.ini', 'Addons/HideGoldLabels/addon.ini',
     'Addons/Runtime/macOS.py', 'Addons/Update.command'];
 var licensePath = 'Addons/Licenses/LICENSE.txt';
+var licensePaths = [licensePath, 'Addons/Licenses/AardvarkUI-LICENSE.txt',
+    'Addons/Licenses/AardvarkHook-LICENSE.txt', 'Addons/Licenses/AardvarkAudio-LICENSE.txt'];
 var licenseText = "MIT License\n\nCopyright (c) 2026 MaxmilianBaron\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE.\n";
 var limit = 16 * 1024 * 1024;
 
@@ -268,11 +270,10 @@ function completedBackup(game, name) {
     requireValue(directory(backup), 'Missing backup folder.');
     var metadata = json(safePath(backup, 'installation.json'));
     requireValue(metadata && typeof metadata.version === 'string' && /^[0-9][A-Za-z0-9._-]{0,63}$/.test(metadata.version) &&
-        Array.isArray(metadata.files) && metadata.files.length <= 67, 'Unknown backup metadata.');
-    var allowed = [licensePath, 'd3d9.dll', 'd3d9.previous.dll', 'Addons/Update.command', 'Addons/Update.sh', 'Addons/Update.cmd',
+        Array.isArray(metadata.files) && metadata.files.length <= 70, 'Unknown backup metadata.');
+    var allowed = licensePaths.concat([ 'd3d9.dll', 'd3d9.previous.dll', 'Addons/Update.command', 'Addons/Update.sh', 'Addons/Update.cmd',
         'Addons/Runtime/Addons.dll', 'Addons/Runtime/ui.bin', 'Addons/Runtime/ui-resources.json',
-        'Addons/Runtime/Update.ps1', 'Addons/Runtime/macOS.py', 'Addons/DamageMeter/DamageMeter.dll',
-        'Addons/DamageMeter/Dear-ImGui-LICENSE.txt', 'Addons/DamageMeter/MinHook-LICENSE.txt'];
+        'Addons/Runtime/Update.ps1', 'Addons/Runtime/macOS.py', 'Addons/DamageMeter/DamageMeter.dll']);
     var expected = ['installation.json'], directories = [''];
     metadata.files.forEach(function(relative) {
         requireValue(typeof relative === 'string' && (allowed.indexOf(relative) >= 0 ||
@@ -348,9 +349,11 @@ function install(game, packageRoot, manifest, checkRunning) {
     var cachePath = safePath(game, 'Addons/Runtime/ui.bin');
     requireValue(!info(cachePath) || regular(cachePath), 'The UI cache target is a directory.');
     var localFiles = {'Addons/Runtime/ui.bin': cache};
-    var licenseTarget = safePath(game, licensePath);
-    requireValue(!info(licenseTarget) || regular(licenseTarget), 'The addon license target is a directory.');
-    if (!info(licenseTarget)) localFiles[licensePath] = textData(licenseText);
+    licensePaths.forEach(function(relative) {
+        var licenseTarget = safePath(game, relative);
+        requireValue(!info(licenseTarget) || regular(licenseTarget), 'The addon license target is a directory.');
+        if (!info(licenseTarget)) localFiles[relative] = textData(licenseText);
+    });
     var loader = safePath(game, 'd3d9.dll'), preserved = safePath(game, 'd3d9.previous.dll');
     var loaderHash = regular(loader) ? fileHash(loader) : null;
     if ((manifest.chainLoaders || []).indexOf(loaderHash) >= 0) {
@@ -373,7 +376,7 @@ function install(game, packageRoot, manifest, checkRunning) {
     try {
         pending.forEach(function(file) {
             var target = safePath(game, file.path), saved = safePath(backup, file.path), existed = regular(target);
-            if (file.path === licensePath && info(target)) {
+            if (licensePaths.indexOf(file.path) >= 0 && info(target)) {
                 requireValue(regular(target), 'The addon license target is a directory.');
                 return;
             }
@@ -384,13 +387,13 @@ function install(game, packageRoot, manifest, checkRunning) {
             if (file.path === 'd3d9.dll' && loaderHash) {
                 requireValue(fileHash(loader) === loaderHash, 'The existing d3d9.dll changed during installation.');
             }
-            if (file.path === licensePath) {
+            if (licensePaths.indexOf(file.path) >= 0) {
                 var staged = safePath(backup, '.license-pending');
                 write(staged, data);
                 try {
                     mkdir(parent(target));
                     if (!fm.moveItemAtPathToPathError($(staged), $(target), Ref())) {
-                        requireValue(regular(safePath(game, licensePath)), 'Could not save the addon license.');
+                        requireValue(regular(safePath(game, file.path)), 'Could not save the addon license.');
                         return;
                     }
                 } finally { if (info(staged)) remove(staged); }
@@ -403,8 +406,8 @@ function install(game, packageRoot, manifest, checkRunning) {
         });
         checkRunning();
         ordered.forEach(function(file) {
-            if (file.path === licensePath && !changed.some(function(item) { return item.path === licensePath; })) {
-                requireValue(regular(safePath(game, licensePath)), 'The addon license is missing.');
+            if (licensePaths.indexOf(file.path) >= 0 && !changed.some(function(item) { return item.path === file.path; })) {
+                requireValue(regular(safePath(game, file.path)), 'The addon license is missing.');
                 return;
             }
             requireValue(fileHash(safePath(game, file.path)) === file.sha256, 'Installed file verification failed.');

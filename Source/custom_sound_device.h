@@ -8,16 +8,7 @@
 #include <fstream>
 #include <memory>
 #include <vector>
-#pragma warning(push,0)
-#define DRWAV_API static
-#define DRWAV_PRIVATE static
-#define DR_WAV_IMPLEMENTATION
-#include "third_party/dr_wav.h"
-#define DRMP3_API static
-#define DRMP3_PRIVATE static
-#define DR_MP3_IMPLEMENTATION
-#include "third_party/dr_mp3.h"
-#pragma warning(pop)
+#include <aardvark_audio/audio.h>
 
 class CustomSoundDevice {
     struct PcmBlock { WAVEHDR header{}; std::vector<short> samples; bool prepared = false, queued = false; };
@@ -29,13 +20,12 @@ class CustomSoundDevice {
     decltype(&waveOutUnprepareHeader) unprepare = nullptr;
     decltype(&waveOutWrite) write = nullptr;
     HWAVEOUT output = nullptr;
-    std::unique_ptr<drwav> wave;
-    std::unique_ptr<drmp3> mp3;
+    aardvark::audio::Reader decoder;
     std::array<PcmBlock,2> blocks;
     unsigned channels = 0, rate = 0, gain = 100;
     bool eof = false;
-    uint64_t Read(uint64_t frames,short* data) {
-        return wave ? drwav_read_pcm_frames_s16(wave.get(),frames,data) : mp3 ? drmp3_read_pcm_frames_s16(mp3.get(),frames,data) : 0;
+    size_t Read(size_t frames,short* data) {
+        return decoder.read_s16(data,frames);
     }
     bool Fill(PcmBlock& block) {
         if (eof) return false;
@@ -71,33 +61,25 @@ public:
             }
             close(output); output = nullptr;
         }
-        if (wave) { drwav_uninit(wave.get()); wave.reset(); }
-        if (mp3) { drmp3_uninit(mp3.get()); mp3.reset(); }
+        decoder.close();
         eof = false; channels = rate = 0;
     }
     bool Open(const std::filesystem::path& path) {
         Close();
-        std::ifstream input(path,std::ios::binary);
-        char tag[4]{};
-        if (!input.read(tag,sizeof(tag))) return false;
-        input.close();
-        if (!std::memcmp(tag,"RIFF",4)) {
-            auto decoder = std::make_unique<drwav>();
-            if (!drwav_init_file_w(decoder.get(),path.c_str(),nullptr)) return false;
-            channels = decoder->channels; rate = decoder->sampleRate; wave = std::move(decoder);
-        } else {
-            auto decoder = std::make_unique<drmp3>();
-            if (!drmp3_init_file_w(decoder.get(),path.c_str(),nullptr)) return false;
-            channels = decoder->channels; rate = decoder->sampleRate; mp3 = std::move(decoder);
-        }
+        aardvark::audio::Limits limits;
+        limits.encoded_bytes = 32ull*1024*1024;
+        limits.decoded_bytes = 64ull*1024*1024;
+        limits.channels = 2; limits.sample_rate = 192000;
+        if (!decoder.open(path,limits)) return false;
+        channels = decoder.format().channels; rate = decoder.format().sample_rate;
         if (channels < 1 || channels > 2 || rate < 8000 || rate > 192000) { Close(); return false; }
         short sample[2]{};
-        const bool valid = Read(1,sample) == 1 && (wave ? drwav_seek_to_pcm_frame(wave.get(),0) : drmp3_seek_to_pcm_frame(mp3.get(),0));
+        const bool valid = Read(1,sample) == 1 && decoder.seek(0);
         if (!valid) Close();
         return valid;
     }
     bool Play(unsigned volume) {
-        if (!Available() || (!wave && !mp3) || output) return false;
+        if (!Available() || !decoder.is_open() || output) return false;
         WAVEFORMATEX format{};
         format.wFormatTag = WAVE_FORMAT_PCM; format.nChannels = static_cast<WORD>(channels);
         format.nSamplesPerSec = rate; format.wBitsPerSample = 16;
