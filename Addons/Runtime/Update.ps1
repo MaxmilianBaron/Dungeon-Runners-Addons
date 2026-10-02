@@ -1,6 +1,33 @@
 param([string]$ClientDirectory = '', [switch]$Interactive)
 $ErrorActionPreference = 'Stop'
 
+function Get-RememberedGameFolder([string]$Preference = '') {
+    if (-not $Preference) { $Preference = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'Dungeon Runners Launcher/folder.txt' }
+    try {
+        if (-not (Test-Path -LiteralPath $Preference -PathType Leaf) -or (Get-Item -LiteralPath $Preference).Length -gt 4096) { return '' }
+        $path = [IO.File]::ReadAllText($Preference).Trim()
+        if ([IO.Path]::IsPathRooted($path) -and (Test-Path -LiteralPath (Join-Path $path 'DungeonRunners.exe') -PathType Leaf)) { return [IO.Path]::GetFullPath($path) }
+    } catch { }
+    return ''
+}
+
+function Save-GameFolder([string]$Game, [string]$Preference = '') {
+    if (-not $Preference) { $Preference = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'Dungeon Runners Launcher/folder.txt' }
+    if (-not (Test-Path -LiteralPath (Join-Path $Game 'DungeonRunners.exe') -PathType Leaf)) { throw 'Game folder not found.' }
+    $directory = [IO.Path]::GetDirectoryName($Preference)
+    foreach ($path in @($directory,$Preference)) {
+        if ((Test-Path -LiteralPath $path) -and ((Get-Item -LiteralPath $path -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'Linked launcher preferences are not supported.' }
+    }
+    $null = [IO.Directory]::CreateDirectory($directory)
+    $pending = Join-Path $directory ('folder-'+[Guid]::NewGuid().ToString('N')+'.tmp')
+    try {
+        [IO.File]::WriteAllText($pending,[IO.Path]::GetFullPath($Game),[Text.UTF8Encoding]::new($false))
+        if (Test-Path -LiteralPath $Preference) { [IO.File]::Replace($pending,$Preference,[NullString]::Value) }
+        else { [IO.File]::Move($pending,$Preference) }
+    } finally { if (Test-Path -LiteralPath $pending) { Remove-Item -LiteralPath $pending -Force } }
+}
+
+
 function Get-UpdatePath([string]$Root,[string]$Relative) {
     if ([IO.Path]::IsPathRooted($Relative) -or $Relative -match '(^|[\\/])\.\.?([\\/]|$)' -or $Relative -match ':') { throw 'Invalid update path.' }
     $base = [IO.Path]::GetFullPath($Root).TrimEnd('\')
@@ -52,7 +79,12 @@ function Invoke-AddonUpdate([string]$Game) {
         Receive-UpdateAsset $release 'package.json' $manifestPath
         $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
         if ($manifest.schema -ne 1 -or $manifest.version -cne $release.tag_name.Substring(1) -or $manifest.installerSha256 -notmatch '^[a-f0-9]{64}$' -or @($manifest.files).Count -lt 7 -or @($manifest.files).Count -gt 64) { throw 'Invalid update manifest.' }
-        if ((Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash.ToLowerInvariant() -notin $manifest.clients) { throw 'This client version is not supported. No files were changed.' }
+        $installer = Get-UpdatePath $stage 'Install.ps1'
+        Receive-UpdateAsset $release 'Install.ps1' $installer $manifest.installerSha256
+        . $installer
+        if ($manifest.PSObject.Properties.Name -contains 'clientCompatibility') {
+            if (-not (Test-ClientCompatibility $exe $manifest.clientCompatibility)) { throw 'Required client code conflicts with these addons. No files were changed. Open the launcher and select Addons to resolve the conflict.' }
+        } elseif ((Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash.ToLowerInvariant() -notin $manifest.clients) { throw 'This client version is not supported. No files were changed.' }
         if ((Get-FileHash -LiteralPath $loader -Algorithm SHA256).Hash.ToLowerInvariant() -notin (@($manifest.loaders) + @($manifest.chainLoaders))) { throw 'This d3d9.dll is not supported for coexistence. It was left untouched.' }
         $paths = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
         $assetNames = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
@@ -78,11 +110,9 @@ function Invoke-AddonUpdate([string]$Game) {
         $cacheValid = (Test-Path -LiteralPath $cache) -and (Get-FileHash -LiteralPath $cache -Algorithm SHA256).Hash.ToLowerInvariant() -ceq $metadata.sha256
         $licensePaths = @('LICENSE.txt','AardvarkUI-LICENSE.txt','AardvarkHook-LICENSE.txt','AardvarkAudio-LICENSE.txt') | ForEach-Object { Get-UpdatePath $Game ('Addons/Licenses/'+$_) }
         $licensePresent = -not @($licensePaths | Where-Object { -not (Test-Path -LiteralPath $_ -PathType Leaf) }).Count
-        $installer = Get-UpdatePath $stage 'Install.ps1'
-        Receive-UpdateAsset $release 'Install.ps1' $installer $manifest.installerSha256
-        . $installer
         $null = Install-Addons $Game $stage
         foreach ($file in $manifest.files) {
+            if ($file.path.EndsWith('/addon.ini') -and (Test-Path -LiteralPath (Get-UpdatePath $Game $file.path) -PathType Leaf)) { continue }
             if ((Get-FileHash -LiteralPath (Get-UpdatePath $Game $file.path) -Algorithm SHA256).Hash.ToLowerInvariant() -cne $file.sha256) { throw ('Installed file failed verification: '+$file.path) }
         }
         if ((Get-FileHash -LiteralPath $cache -Algorithm SHA256).Hash.ToLowerInvariant() -cne $metadata.sha256) { throw 'Installed UI cache failed verification.' }
@@ -104,10 +134,11 @@ try {
         $candidate = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
         if (Test-Path -LiteralPath (Join-Path $candidate 'DungeonRunners.exe')) { $ClientDirectory = $candidate }
     }
+    if (-not $ClientDirectory) { $ClientDirectory = Get-RememberedGameFolder }
     if (-not $ClientDirectory -and $Interactive) {
         Add-Type -AssemblyName System.Windows.Forms
         $picker = New-Object System.Windows.Forms.FolderBrowserDialog
-        $picker.Description = 'Select the Dungeon Runners folder containing DungeonRunners.exe.'
+        $picker.Description = 'Game folder not found. Select the folder containing DungeonRunners.exe.'
         $picker.ShowNewFolderButton = $false
         if ($picker.ShowDialog() -ne [System.Windows.Forms.DialogResult]::OK) { exit 0 }
         $ClientDirectory = $picker.SelectedPath
@@ -115,6 +146,7 @@ try {
     }
     if (-not $ClientDirectory) { throw 'Use Update.cmd or provide -ClientDirectory.' }
     $result = Invoke-AddonUpdate $ClientDirectory
+    Save-GameFolder $ClientDirectory
     Write-Output $result
     if ($Interactive) { Add-Type -AssemblyName System.Windows.Forms; $null = [System.Windows.Forms.MessageBox]::Show($result,'Dungeon Runners Addons','OK','Information') }
 } catch {

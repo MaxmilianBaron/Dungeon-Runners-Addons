@@ -165,9 +165,29 @@ function manifestFiles(manifest, version) {
     return files;
 }
 
+function compatibleClient(exe, profile) {
+    requireValue(profile && profile.schema === 1 && Number.isInteger(profile.minimumSize) && Number.isInteger(profile.maximumSize) &&
+        profile.minimumSize >= 64 && profile.maximumSize >= profile.minimumSize && profile.maximumSize <= 33554432 &&
+        Array.isArray(profile.ranges) && profile.ranges.length > 0 && profile.ranges.length <= 512, 'Invalid client compatibility profile.');
+    var end = 0;
+    profile.ranges.forEach(function(range) {
+        requireValue(range && Number.isInteger(range.offset) && Number.isInteger(range.length) && range.offset >= end && range.length > 0 &&
+            range.offset + range.length <= profile.minimumSize && Array.isArray(range.sha256) && range.sha256.length > 0 && range.sha256.length <= 4 &&
+            range.sha256.every(function(h) { return typeof h === 'string' && /^[a-f0-9]{64}$/.test(h); }), 'Invalid protected client range.');
+        end = range.offset + range.length;
+    });
+    var data = read(exe, profile.maximumSize);
+    requireValue(Number(data.length) >= profile.minimumSize, 'Incomplete client image.');
+    return profile.ranges.every(function(range) {
+        return range.sha256.indexOf(hash(data.subdataWithRange($.NSMakeRange(range.offset, range.length)))) >= 0;
+    });
+}
+
 function validateClient(game, manifest, updating) {
     var exe = safePath(game, 'DungeonRunners.exe'), loader = safePath(game, 'd3d9.dll');
-    requireValue(regular(exe) && manifest.clients.indexOf(fileHash(exe)) >= 0, 'Select a supported folder containing DungeonRunners.exe.');
+    requireValue(regular(exe), 'Select a folder containing DungeonRunners.exe.');
+    var supported = Object.prototype.hasOwnProperty.call(manifest, 'clientCompatibility') ? compatibleClient(exe, manifest.clientCompatibility) : manifest.clients.indexOf(fileHash(exe)) >= 0;
+    requireValue(supported, 'Required client code conflicts with these addons. No files were changed. Open the launcher and select Addons to resolve the conflict.');
     requireValue(!updating || regular(loader), 'The updater requires an existing addon installation. Use the installer first.');
     requireValue(!info(loader) || (regular(loader) && manifest.loaders.concat(manifest.chainLoaders || []).indexOf(fileHash(loader)) >= 0),
         'This d3d9.dll is not supported for coexistence. It was left untouched.');
@@ -368,8 +388,9 @@ function install(game, packageRoot, manifest, checkRunning) {
     var ordered = files.filter(function(f) { return f.path !== 'd3d9.dll'; }).concat(Object.keys(localFiles).map(function(path) {
         return {path: path, sha256: hash(localFiles[path])};
     })).concat(files.filter(function(f) { return f.path === 'd3d9.dll'; }));
+    ordered = ordered.filter(function(f) { return !f.path.endsWith('/addon.ini') || !regular(safePath(game, f.path)); });
     var pending = ordered.filter(function(file) { var path = safePath(game, file.path); return !regular(path) || fileHash(path) !== file.sha256; });
-    if (!pending.length) { chmod(safePath(game, 'Addons/Update.command'), true); pruneBackups(game); return 0; }
+    if (!pending.length) { chmod(safePath(game, 'Addons/Update.command'), true); return 0; }
     var backup = safePath(game, 'Addons/Backups/' + new Date().toISOString().replace(/[^0-9]/g, '') + '-' + ObjC.unwrap($.NSUUID.UUID.UUIDString));
     mkdir(backup);
     var changed = [];
@@ -427,7 +448,6 @@ function install(game, packageRoot, manifest, checkRunning) {
         requireValue(!failures.length, 'Installation stopped. Some files could not be restored; backups are in Addons/Backups.');
         throw error;
     }
-    pruneBackups(game);
     return changed.length;
 }
 
@@ -528,7 +548,25 @@ function chooseGame(app) {
         if (!selected) throw {number: -128};
         if (selected[0] !== items[items.length - 1]) return selected[0];
     }
-    return resolve(app.chooseFolder({withPrompt: 'Select your installed Dungeon Runners folder (containing DungeonRunners.exe).'}).toString());
+    return resolve(app.chooseFolder({withPrompt: 'Game folder not found. Select the folder containing DungeonRunners.exe.'}).toString());
+}
+
+function folderPreference() {
+    return join(ObjC.unwrap($.NSHomeDirectory()), 'Library/Application Support/Dungeon Runners Launcher/folder.txt');
+}
+function rememberedGame() {
+    try {
+        var preference = folderPreference();
+        if (!regular(preference)) return null;
+        var path = dataText(read(preference, 4096)).trim();
+        if (path.charAt(0) === '/' && regular(join(path, 'DungeonRunners.exe'))) return resolve(path);
+    } catch (error) { }
+    return null;
+}
+function rememberGame(game) {
+    var preference = folderPreference();
+    safePath(parent(preference), 'folder.txt');
+    write(preference, textData(resolve(game)));
 }
 
 function run(argv) {
@@ -548,7 +586,7 @@ function run(argv) {
         var candidate = parent(base), game;
         if (options['--client']) game = resolve(options['--client']);
         else if (mode === 'update' && regular(join(candidate, 'DungeonRunners.exe'))) game = candidate;
-        else game = chooseGame(app);
+        else game = rememberedGame() || chooseGame(app);
         var packageRoot, manifest;
         if (mode === 'install') {
             packageRoot = options['--package'] ? resolve(options['--package']) : candidate;
@@ -564,6 +602,7 @@ function run(argv) {
             var result = update(game);
             message = 'V' + result.version + ': ' + result.count + ' changed files downloaded. Settings and history were preserved.';
         }
+        rememberGame(game);
         if (!options['--client']) app.displayDialog(message, {withTitle: 'Dungeon Runners Addons', buttons: ['OK'], defaultButton: 'OK'});
         return message;
     } catch (error) {

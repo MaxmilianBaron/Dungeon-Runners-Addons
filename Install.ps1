@@ -1,6 +1,33 @@
 param([string]$ClientDirectory = '', [switch]$Interactive)
 $ErrorActionPreference = 'Stop'
 
+function Get-RememberedGameFolder([string]$Preference = '') {
+    if (-not $Preference) { $Preference = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'Dungeon Runners Launcher/folder.txt' }
+    try {
+        if (-not (Test-Path -LiteralPath $Preference -PathType Leaf) -or (Get-Item -LiteralPath $Preference).Length -gt 4096) { return '' }
+        $path = [IO.File]::ReadAllText($Preference).Trim()
+        if ([IO.Path]::IsPathRooted($path) -and (Test-Path -LiteralPath (Join-Path $path 'DungeonRunners.exe') -PathType Leaf)) { return [IO.Path]::GetFullPath($path) }
+    } catch { }
+    return ''
+}
+
+function Save-GameFolder([string]$Game, [string]$Preference = '') {
+    if (-not $Preference) { $Preference = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'Dungeon Runners Launcher/folder.txt' }
+    if (-not (Test-Path -LiteralPath (Join-Path $Game 'DungeonRunners.exe') -PathType Leaf)) { throw 'Game folder not found.' }
+    $directory = [IO.Path]::GetDirectoryName($Preference)
+    foreach ($path in @($directory,$Preference)) {
+        if ((Test-Path -LiteralPath $path) -and ((Get-Item -LiteralPath $path -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'Linked launcher preferences are not supported.' }
+    }
+    $null = [IO.Directory]::CreateDirectory($directory)
+    $pending = Join-Path $directory ('folder-'+[Guid]::NewGuid().ToString('N')+'.tmp')
+    try {
+        [IO.File]::WriteAllText($pending,[IO.Path]::GetFullPath($Game),[Text.UTF8Encoding]::new($false))
+        if (Test-Path -LiteralPath $Preference) { [IO.File]::Replace($pending,$Preference,[NullString]::Value) }
+        else { [IO.File]::Move($pending,$Preference) }
+    } finally { if (Test-Path -LiteralPath $pending) { Remove-Item -LiteralPath $pending -Force } }
+}
+
+
 function Get-AddonLicensePaths {
     @('Addons/Licenses/LICENSE.txt','Addons/Licenses/AardvarkUI-LICENSE.txt',
       'Addons/Licenses/AardvarkHook-LICENSE.txt','Addons/Licenses/AardvarkAudio-LICENSE.txt')
@@ -50,6 +77,28 @@ function Get-ChildPath([string]$Root, [string]$Relative) {
         $cursor = [IO.Path]::GetDirectoryName($cursor)
     }
     return $result
+}
+
+function Test-ClientCompatibility([string]$Path, $Profile) {
+    if ($null -eq $Profile -or $Profile.schema -ne 1 -or $Profile.minimumSize -lt 64 -or $Profile.maximumSize -lt $Profile.minimumSize -or $Profile.maximumSize -gt 33554432 -or @($Profile.ranges).Count -lt 1 -or @($Profile.ranges).Count -gt 512) { throw 'Invalid client compatibility profile.' }
+    $end = 0L
+    foreach ($range in $Profile.ranges) {
+        if ($range.offset -isnot [ValueType] -or $range.length -isnot [ValueType] -or $range.offset -ne [Math]::Truncate([double]$range.offset) -or $range.length -ne [Math]::Truncate([double]$range.length) -or $range.offset -lt $end -or $range.length -le 0 -or $range.offset -gt $Profile.minimumSize-$range.length -or @($range.sha256).Count -lt 1 -or @($range.sha256).Count -gt 4 -or @($range.sha256 | Where-Object { $_ -isnot [string] -or $_ -cnotmatch '^[a-f0-9]{64}$' }).Count) { throw 'Invalid protected client range.' }
+        $end = $range.offset+$range.length
+    }
+    $input = [IO.File]::OpenRead($Path)
+    $algorithm = [Security.Cryptography.SHA256]::Create()
+    try {
+        if ($input.Length -lt $Profile.minimumSize -or $input.Length -gt $Profile.maximumSize) { return $false }
+        $bytes = New-Object byte[] ([int]$input.Length)
+        $read = 0
+        while ($read -lt $bytes.Length) { $count = $input.Read($bytes,$read,$bytes.Length-$read); if (-not $count) { throw 'Incomplete client image.' }; $read += $count }
+        foreach ($range in $Profile.ranges) {
+            $hash = [BitConverter]::ToString($algorithm.ComputeHash($bytes,[int]$range.offset,[int]$range.length)).Replace('-','').ToLowerInvariant()
+            if ($hash -cnotin $range.sha256) { return $false }
+        }
+        return $true
+    } finally { $algorithm.Dispose(); $input.Dispose() }
 }
 
 function Read-GameResource($Stream, $Entry) {
@@ -221,7 +270,9 @@ function Install-Addons([string]$Game,[string]$Package) {
     $exe = Get-ChildPath $Game 'DungeonRunners.exe'
     if (-not (Test-Path -LiteralPath $exe)) { throw 'Choose the folder containing DungeonRunners.exe.' }
     $clientHash = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash.ToLowerInvariant()
-    if ($clientHash -notin $manifest.clients) { throw 'This client version is not supported. No files were changed.' }
+    if ($manifest.PSObject.Properties.Name -contains 'clientCompatibility') {
+        if (-not (Test-ClientCompatibility $exe $manifest.clientCompatibility)) { throw 'Required client code conflicts with these addons. No files were changed. Open the launcher and select Addons to resolve the conflict.' }
+    } elseif ($clientHash -notin $manifest.clients) { throw 'This client version is not supported. No files were changed.' }
     $licenseRelatives = @(Get-AddonLicensePaths)
     foreach ($relative in $licenseRelatives) {
         $licensePath = Get-ChildPath $Game $relative
@@ -266,12 +317,12 @@ function Install-Addons([string]$Game,[string]$Package) {
     $backupRoot = Get-ChildPath $Game ('Addons\Backups\'+$identity)
     $pendingRoot = Get-ChildPath $Game ('Addons\Runtime\.install-'+$identity)
     $files = @($manifest.files | Where-Object path -ne 'd3d9.dll') + @($localFiles.Keys | ForEach-Object { [pscustomobject]@{path=$_; sha256=(Get-BytesHash $localFiles[$_])} }) + @($manifest.files | Where-Object path -eq 'd3d9.dll')
+    $files = @($files | Where-Object { -not ($_.path.EndsWith('/addon.ini') -and (Test-Path -LiteralPath (Get-ChildPath $Game $_.path) -PathType Leaf)) })
     $needed = @($files | Where-Object {
         $destination = Get-ChildPath $Game $_.path
         -not (Test-Path -LiteralPath $destination) -or (Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash.ToLowerInvariant() -ne $_.sha256
     })
     if (-not $needed.Count) {
-        Remove-OldAddonBackups $Game
         return ('Version V'+$manifest.version+' is already installed.')
     }
     New-Item -ItemType Directory -Path $backupRoot,$pendingRoot -Force | Out-Null
@@ -335,16 +386,16 @@ function Install-Addons([string]$Game,[string]$Package) {
             }
         }
     }
-    Remove-OldAddonBackups $Game
     return ('Installed V'+$manifest.version+'. Start the game normally, then open ESC > Addons. Existing settings and history were preserved.')
 }
 
 if ($MyInvocation.InvocationName -eq '.') { return }
 try {
-    if ($Interactive) {
+    if (-not $ClientDirectory) { $ClientDirectory = Get-RememberedGameFolder }
+    if ($Interactive -and (-not $ClientDirectory -or -not (Test-Path -LiteralPath (Join-Path $ClientDirectory 'DungeonRunners.exe') -PathType Leaf))) {
         Add-Type -AssemblyName System.Windows.Forms
         $picker = New-Object System.Windows.Forms.FolderBrowserDialog
-        $picker.Description = 'Select the Dungeon Runners folder containing DungeonRunners.exe.'
+        $picker.Description = 'Game folder not found. Select the folder containing DungeonRunners.exe.'
         $picker.ShowNewFolderButton = $false
         if ($ClientDirectory) { $picker.SelectedPath = $ClientDirectory }
         if ($picker.ShowDialog() -ne [System.Windows.Forms.DialogResult]::OK) { exit 0 }
@@ -353,10 +404,11 @@ try {
     }
     if (-not $ClientDirectory) { throw 'Use Install.cmd or provide -ClientDirectory.' }
     $result = Install-Addons $ClientDirectory $PSScriptRoot
+    Save-GameFolder $ClientDirectory
     Write-Output $result
-    if ($Interactive) { $null = [System.Windows.Forms.MessageBox]::Show($result,'Dungeon Runners Addons','OK','Information') }
+    if ($Interactive) { Add-Type -AssemblyName System.Windows.Forms; $null = [System.Windows.Forms.MessageBox]::Show($result,'Dungeon Runners Addons','OK','Information') }
 } catch {
-    if ($Interactive) { $null = [System.Windows.Forms.MessageBox]::Show($_.Exception.Message,'Installation stopped','OK','Error') }
+    if ($Interactive) { Add-Type -AssemblyName System.Windows.Forms; $null = [System.Windows.Forms.MessageBox]::Show($_.Exception.Message,'Installation stopped','OK','Error') }
     Write-Error $_
     exit 1
 }

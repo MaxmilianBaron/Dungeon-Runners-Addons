@@ -32,6 +32,8 @@ foreach ($line in $environmentLines) {
     }
 }
 New-Item -ItemType Directory -Force -Path $OutputDirectory | Out-Null
+& $python (Join-Path $PSScriptRoot 'build_client_compatibility.py') --output $OutputDirectory
+if ($LASTEXITCODE -ne 0) { throw 'Client compatibility generation failed.' }
 & $python (Join-Path $PSScriptRoot 'build_native_catalog.py') $ClientDirectory $OutputDirectory
 if ($LASTEXITCODE -ne 0) { throw 'Verified skill catalog generation failed' }
 & $python (Join-Path $PSScriptRoot 'build_native_skin.py') $ClientDirectory $OutputDirectory

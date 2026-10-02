@@ -24,6 +24,7 @@
 #include "native_loadouts.h"
 #include "native_move_layout.h"
 #include "move_projection.h"
+#include "client_compatibility.h"
 
 extern "C" int __cdecl MeterOverlayStart(const char*);
 extern "C" int __cdecl MeterOverlayUpdate(const void*, unsigned);
@@ -769,7 +770,7 @@ static BOOL CALLBACK InitializeAddon(PINIT_ONCE, PVOID, PVOID*) {
         status = addon / L"status.txt";
         const auto archive = ArchiveMeterReports(directory, addon / L"reports", [](const auto& file) { return FileHash(file, BCRYPT_SHA256_ALGORITHM, 32); });
         const auto digest = FileHash(path, BCRYPT_SHA256_ALGORITHM, 32);
-        if (digest != "634f2c6789d9dc69df22c61e0d221aebe4bcc4bd13f8d36c4cd78edc31cf196b" && digest != "f16f47302fa58ea30f4509363df877a3601adc85f99cdcbc3d27e9ce84ae1da8" && digest != "4ef50ede46874148890d2ec11dcc43c3ab40b92b68fb2e7133183f3adf6844f6") throw std::runtime_error("Unsupported client image; addon disabled");
+        if (!ClientImageCompatible(path)) throw std::runtime_error("Required client code or layout differs; addon disabled");
         if (!VerifyCatalog(directory)) throw std::runtime_error("Skill data identity differs; addon disabled");
         image = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
         const auto settings = (addon / L"ui.ini").u8string();

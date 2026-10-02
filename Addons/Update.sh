@@ -136,10 +136,34 @@ def validate_manifest(manifest, version=None):
     return files
 
 
+def compatible_client(exe, profile):
+    require(isinstance(profile, dict) and profile.get('schema') == 1 and
+            type(profile.get('minimumSize')) is int and type(profile.get('maximumSize')) is int and
+            64 <= profile['minimumSize'] <= profile['maximumSize'] <= 33554432,
+            'Invalid client compatibility profile.')
+    ranges = profile.get('ranges')
+    require(isinstance(ranges, list) and 1 <= len(ranges) <= 512, 'Invalid protected client ranges.')
+    end = 0
+    for region in ranges:
+        require(isinstance(region, dict) and type(region.get('offset')) is int and type(region.get('length')) is int,
+                'Invalid protected client range.')
+        offset, length, hashes = region['offset'], region['length'], region.get('sha256')
+        require(offset >= end and length > 0 and offset + length <= profile['minimumSize'] and
+                isinstance(hashes, list) and 1 <= len(hashes) <= 4 and
+                all(isinstance(h, str) and HASH.fullmatch(h) for h in hashes), 'Invalid protected client range.')
+        end = offset + length
+    with exe.open('rb') as stream:
+        require(profile['minimumSize'] <= os.fstat(stream.fileno()).st_size <= profile['maximumSize'], 'Unsupported client image size.')
+        data = stream.read(profile['maximumSize'] + 1)
+    require(profile['minimumSize'] <= len(data) <= profile['maximumSize'], 'Incomplete client image.')
+    return all(digest(data[r['offset']:r['offset']+r['length']]) in r['sha256'] for r in ranges)
+
+
 def validate_client(game, manifest, updating=False):
     exe = child(game, 'DungeonRunners.exe')
-    require(exe.is_file() and file_hash(exe) in manifest['clients'],
-            'Select a supported folder containing DungeonRunners.exe.')
+    require(exe.is_file(), 'Select a folder containing DungeonRunners.exe.')
+    supported = compatible_client(exe, manifest['clientCompatibility']) if 'clientCompatibility' in manifest else file_hash(exe) in manifest['clients']
+    require(supported, 'Required client code conflicts with these addons. No files were changed. Open the launcher and select Addons to resolve the conflict.')
     loader = child(game, 'd3d9.dll')
     require(not updating or loader.is_file(), 'The updater requires an existing addon installation. Use the installer first.')
     require(not loader.exists() or (loader.is_file() and file_hash(loader) in manifest['loaders'] + manifest.get('chainLoaders', [])),
@@ -512,10 +536,10 @@ def install(game, package, manifest, check_running=game_stopped):
         require(not target.exists() or target.is_file(), 'A local addon data target is a directory.')
     ordered = [f for f in files if f['path'] != 'd3d9.dll'] + [
         {'path': path, 'sha256': digest(data)} for path, data in local_files.items()] + [f for f in files if f['path'] == 'd3d9.dll']
+    ordered = [f for f in ordered if not (f['path'].endswith('/addon.ini') and child(game, f['path']).is_file())]
     if all(child(game, f['path']).is_file() and
             file_hash(child(game, f['path'])) == f['sha256'] for f in ordered):
         child(game, 'Addons/Update.sh').chmod(0o755)
-        prune_backups(game)
         return 0
     backup.mkdir(parents=True)
     pending.mkdir(parents=True)
@@ -586,7 +610,6 @@ def install(game, package, manifest, check_running=game_stopped):
         raise
     finally:
         shutil.rmtree(pending)
-    prune_backups(game)
     return len(changed)
 
 
@@ -659,6 +682,38 @@ def update(game, release=None, receive=asset_bytes, check_running=game_stopped, 
 
 
 
+def folder_preference():
+    location = Path(os.environ.get('XDG_DATA_HOME', str(Path.home()/'.local/share')))
+    if not location.is_absolute():
+        location = Path.home()/'.local/share'
+    return location/'Dungeon Runners Launcher/folder.txt'
+
+
+def remembered_game():
+    try:
+        preference = folder_preference()
+        if preference.is_file() and preference.stat().st_size <= 4096:
+            game = Path(preference.read_text(encoding='utf-8-sig').strip())
+            if game.is_absolute() and (game/'DungeonRunners.exe').is_file():
+                return game.resolve()
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def remember_game(game):
+    preference = folder_preference()
+    require(not preference.is_symlink() and not preference.parent.is_symlink(), 'Linked launcher preferences are not supported.')
+    preference.parent.mkdir(parents=True, exist_ok=True)
+    pending = preference.with_name('folder-'+uuid.uuid4().hex+'.tmp')
+    try:
+        with pending.open('x', encoding='utf-8') as output:
+            output.write(str(game.resolve()))
+        os.replace(pending, preference)
+    finally:
+        if pending.exists(): pending.unlink()
+
+
 def main():
     parser = argparse.ArgumentParser(description='Install or update Dungeon Runners Addons in the game folder')
     parser.add_argument('mode', choices=('install', 'update'), nargs='?', default='update')
@@ -677,7 +732,9 @@ def main():
         elif arguments.mode == 'update' and (candidate/'DungeonRunners.exe').is_file():
             game = candidate
         else:
-            game = select_path('Select the installed game folder containing DungeonRunners.exe.', find_games(prefix_candidates()))
+            game = remembered_game()
+            if game is None:
+                game = select_path('Game folder not found. Select the folder containing DungeonRunners.exe.', find_games(prefix_candidates()))
         if arguments.mode == 'install':
             package = Path(arguments.package).resolve() if arguments.package else candidate
             manifest = read_json(child(package, 'linux-package.json'))
@@ -693,6 +750,7 @@ def main():
         else:
             version, count = update(game, release, manifest=manifest)
             print('V' + version + ': ' + str(count) + ' changed files downloaded. Settings and history were preserved.')
+        remember_game(game)
         return 0
     except KeyboardInterrupt:
         return 130

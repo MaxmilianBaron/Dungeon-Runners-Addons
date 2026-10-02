@@ -3,6 +3,7 @@
 /Tools/*
 !/Tools/build.ps1
 !/Tools/build_bank_catalog.py
+!/Tools/build_client_compatibility.py
 !/Tools/build_native_catalog.py
 !/Tools/build_native_skin.py
 !/Tools/catalog.py
