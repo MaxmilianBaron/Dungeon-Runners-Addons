@@ -30,6 +30,14 @@
 #include "loadouts_store.h"
 #include "loadout_name.h"
 #include "leaderboard_client.h"
+#include "controller.h"
+
+extern "C" void __cdecl MeterControllerRelease();
+static Controller::Settings controllerOptions,draftControllerOptions;
+static Controller::Status controllerStatus;
+static std::filesystem::path controllerSettings;
+static std::string controllerMessage;
+static unsigned controllerPage=0;
 
 
 
@@ -413,6 +421,7 @@ static bool InputAllowed(UiPoint point,bool menuLayer) {
 }
 
 static LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
+    if (message==WM_KILLFOCUS || message==WM_NCDESTROY || (message==WM_ACTIVATEAPP && !wparam) || (message==WM_SIZE && wparam==SIZE_MINIMIZED)) MeterControllerRelease();
     WNDPROC original;
     bool consume = false, nativeBankClose = false;
     {
@@ -506,6 +515,7 @@ static LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wparam
 }
 
 static void ShutdownUnlocked() {
+    MeterControllerRelease();
     combatCursorRing.Reset(); previewCursorRing.Reset();
     std::vector<MeterDetailRow>().swap(detailRows); std::vector<float>().swap(detailOffsets); cachedDetailRevision = UINT64_MAX;
     EndPanelResize();
@@ -1307,13 +1317,15 @@ static void ApplyAddons() {
     SavePreferences();
 }
 
-static int OptionRow(const char* label,const char* value,UiPoint position,UiPoint scale,const char* description,UiPoint tooltip, float left,RECT* bounds = nullptr) {
+static int OptionRow(const char* label,const char* value,UiPoint position,UiPoint scale,const char* description,UiPoint tooltip, float left,RECT* bounds = nullptr,bool atlas=false) {
     UiDrawList* draw = Ui::GetWindowDrawList();
     const UiPoint size(330 * scale.x,30 * scale.y);
     draw->AddRectFilled(At(position,scale,14,0),At(position,scale,316,30),UI_COLOR(0,0,0,100));
     nativeSkin.AlignedText(draw,label,At(position,scale,25,0),UiPoint(143 * scale.x,30 * scale.y),scale);
-    const UiPoint extent = valueFont->CalcTextSizeA(14 * scale.y,FLT_MAX,0,value);
-    BodyText(draw,value,UiPoint(position.x+238 * scale.x-extent.x * 0.5f,position.y+(30*scale.y-extent.y)*.5f),scale,UI_WHITE);
+    const UiPoint extent = (atlas ? meterFont.get() : valueFont)->CalcTextSizeA(14 * scale.y,FLT_MAX,0,value);
+    const UiPoint textPosition(position.x+238 * scale.x-extent.x * 0.5f,position.y+(30*scale.y-extent.y)*.5f);
+    if (atlas) MeterText(draw,value,textPosition,scale,UI_WHITE);
+    else BodyText(draw,value,textPosition,scale,UI_WHITE);
     int clicked = 0;
     Ui::PushID(label);
     for (unsigned arrow=0;arrow<2;++arrow) {
@@ -1684,6 +1696,7 @@ static void DrawBankSort() {
 }
 
 #include "loadouts_ui.h"
+#include "controller_ui.h"
 
 static const char* CursorColorNames[] = {"Red","Yellow","White","Green","Cyan","Blue","Purple","Pink"};
 static const UiColor CursorColors[] = {UI_COLOR(255,32,32,255),UI_COLOR(255,220,32,255),UI_COLOR(255,255,255,255),UI_COLOR(64,255,64,255),UI_COLOR(32,230,255,255),UI_COLOR(80,128,255,255),UI_COLOR(180,80,255,255),UI_COLOR(255,80,180,255)};
@@ -2106,6 +2119,7 @@ static void DiscoverAddons(const std::filesystem::path& root) {
     if (addonRegistry.BankSort()) registeredAddons.push_back({"sort-bank-pages","Sort Bank Pages","Sort one bank page or all accessible pages.",OpenBankSettings,DrawBankSettings,nullptr});
     if (addonRegistry.MoveEverything()) registeredAddons.push_back({"moveeverything","Moveeverything","Move player, party, target, chat, minimap and buff/curse panels.",OpenMoveSettings,DrawMoveSettings,nullptr});
     if (addonRegistry.Loadouts()) registeredAddons.push_back({"loadouts","Loadouts","Save equipment sets next to Inventory.",OpenLoadoutSettings,DrawLoadoutSettings,nullptr});
+    if (addonRegistry.ControllerEnabled()) registeredAddons.push_back({"controller","Controller","Gamepad movement, combat, consumables and menus.",OpenControllerSettings,DrawControllerSettings,nullptr});
     for (const auto& extension:addonRegistry.Extensions()) registeredAddons.push_back({extension.id,extension.name,extension.description,OpenExtensionSettings,DrawExtensionSettings,&extension,addonRegistry.Settings(extension)});
 }
 
@@ -2163,8 +2177,10 @@ static void DrawAddons() {
     }
     if (addonsOpen) {
         const float listHeight = std::clamp(static_cast<float>(registeredAddons.size())*48,48.0f,192.0f);
-        const float height = activeAddon ? (activeAddon->advanced ? 506.0f : activeAddon->open == OpenWellSettings ? 518.0f : activeAddon->open == OpenDamageSettings ? 390.0f : activeAddon->open == OpenNameplateSettings && !nameplatePage ? 340.0f : activeAddon->open == OpenMythicSettings ? 365.0f : activeAddon->open == OpenCursorSettings ? 347.0f : 289.0f) : 125+listHeight;
-        const UiPoint scale = FitScale(buttonScale,UiPoint(350,height));
+        const float height = activeAddon ? (activeAddon->advanced || activeAddon->open == OpenControllerSettings ? 506.0f : activeAddon->open == OpenWellSettings ? 518.0f : activeAddon->open == OpenDamageSettings ? 390.0f : activeAddon->open == OpenNameplateSettings && !nameplatePage ? 340.0f : activeAddon->open == OpenMythicSettings ? 365.0f : activeAddon->open == OpenCursorSettings ? 347.0f : 289.0f) : 125+listHeight;
+        const bool controllerPanel=activeAddon && activeAddon->open==OpenControllerSettings;
+        const auto preferred=controllerPanel ? UiPoint(std::max(buttonScale.x,1.5f),std::max(buttonScale.y,1.5f)) : buttonScale;
+        const UiPoint scale = FitScale(preferred,UiPoint(350,height));
         const UiPoint panelSize(350 * scale.x,height * scale.y);
         const UiPoint origin(std::floor((display.x-panelSize.x)*0.5f),std::floor((display.y-panelSize.y)*0.5f));
         Ui::SetNextWindowPos(origin);
@@ -2190,6 +2206,9 @@ extern "C" __declspec(dllexport) int __cdecl MeterOverlayStart(const char* iniFi
     const auto addonsDirectory=std::filesystem::u8path(settingsFile).parent_path().parent_path();
     if (!LoadSkinData(addonsDirectory/L"Runtime"/L"ui.bin")) return 0;
     DiscoverAddons(addonsDirectory);
+    controllerSettings=addonsDirectory/L"Controller"/L"settings.ini";
+    controllerOptions={}; controllerStatus={};
+    { std::ifstream input(controllerSettings); controllerOptions.Load(input); }
     leaderboardClient=addonRegistry.Leaderboard() ? std::make_unique<Leaderboard::Client>() : nullptr;
     leaderboardOpen=leaderboardWeek=false; leaderboardCategory=Leaderboard::Category::Level; leaderboardBoard.reset(); leaderboardRows.clear(); leaderboardPage=0;
     leaderboardArea=leaderboardButtonRect={};
@@ -2371,6 +2390,7 @@ extern "C" void __cdecl MeterOverlayLayer(IDirect3DDevice9* device,AddonUiLayer 
     Ui::SetInputEnabled(InputAllowed(Ui::GetIO().MousePos,layer == AddonUiLayer::Menu));
     if (layer == AddonUiLayer::Meter) {
         help.text.clear();
+        DrawControllerHints();
         DrawWellTimer();
         if (visible) DrawPanel(); else panelOptionsOpen=false;
         DrawHistory();
@@ -2418,6 +2438,16 @@ extern "C" __declspec(dllexport) void __cdecl MeterOverlayRender(IDirect3DDevice
 }
 
 extern "C" bool __cdecl MeterOverlayCursorEnabled() { Lock lock; return addonRegistry.CombatCursor() && cursorOptions.enabled; }
+extern "C" bool __cdecl MeterOverlayController(Controller::Settings* settings,const Controller::Status* value,HWND* window,bool* blocked,IDirect3DDevice9* device) {
+    Lock lock;
+    const bool installed=addonRegistry.ControllerEnabled() && !shuttingDown;
+    if (installed && !context && device && SUCCEEDED(device->TestCooperativeLevel())) InitializeGraphics(device);
+    if (settings) *settings=controllerOptions;
+    if (value) controllerStatus=*value;
+    if (window) *window=gameWindow;
+    if (blocked) *blocked=addonsOpen || leaderboardOpen || reportOpen || historyOpen || panelOptionsOpen || moveEditing || loadoutRenaming || bankFrame.busy || loadoutFrame.busy;
+    return installed;
+}
 extern "C" void __cdecl MeterOverlayCursorCombat(uint64_t until) { Lock lock; cursorCombatUntil = until; }
 
 extern "C" bool __cdecl MeterOverlayBankSettings(const BankSortFrame* value,unsigned* action,bool* focused) {

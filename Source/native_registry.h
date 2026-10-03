@@ -11,6 +11,7 @@ class AddonRegistry {
     std::vector<ExtensionSettings> settings;
     std::vector<ExtensionGetStatus> statuses;
     bool damage = false, money = false, cooldowns = false, nameplates = false, characterSheet = false, mythicSounds = false, wishingWell = false, combatCursor = false, bankSort = false, moveEverything = false, loadouts = false, leaderboard = false;
+    bool controller = false;
     unsigned rejected = 0;
 
     static bool Plain(const char* value,size_t size) {
@@ -66,7 +67,7 @@ public:
         return true;
     }
     void Discover(const std::filesystem::path& root) {
-        extensions.clear(); settings.clear(); statuses.clear(); damage=money=cooldowns=nameplates=characterSheet=mythicSounds=wishingWell=combatCursor=bankSort=moveEverything=loadouts=leaderboard=false; rejected=0;
+        extensions.clear(); settings.clear(); statuses.clear(); damage=money=cooldowns=nameplates=characterSheet=mythicSounds=wishingWell=combatCursor=bankSort=moveEverything=loadouts=leaderboard=controller=false; rejected=0;
         std::error_code error;
         if (!Regular(root,true)) return;
         std::vector<std::filesystem::path> directories;
@@ -92,6 +93,8 @@ public:
             if (builtin=="Moveeverything" && id=="moveeverything") { moveEverything=true; continue; }
             if (builtin=="Loadouts" && id=="loadouts") { loadouts=true; continue; }
             if (builtin=="Leaderboard" && id=="leaderboard") { leaderboard=true; continue; }
+            if (builtin=="Controller" && id=="controller") { controller=true; continue; }
+            if (id=="controller") { ++rejected; continue; }
             if (builtin=="Nameplates" && id=="nameplates") { nameplates=true; continue; }
             if ((builtin=="HideGoldLabels" && id=="hide-gold-labels") || (builtin=="HideMoneyBoxes" && id=="hide-money-boxes")) { money=true; continue; }
             if (!builtin.empty() || id=="damage-meter" || id=="hide-gold-labels" || id=="hide-money-boxes" || id=="cooldown-timers" || id=="nameplates" || id=="better-character-sheet" || id=="mythic-drop-sounds" || id=="wishing-well-tracker" || id=="cursor-circle" || id=="sort-bank-pages" || id=="moveeverything" || id=="loadouts" || id=="leaderboard") { ++rejected; continue; }
@@ -129,6 +132,7 @@ public:
     bool MoveEverything() const { return moveEverything; }
     bool Loadouts() const { return loadouts; }
     bool Leaderboard() const { return leaderboard; }
+    bool ControllerEnabled() const { return controller; }
     bool Nameplates() const { return nameplates; }
     unsigned Rejected() const { return rejected; }
     const std::vector<ExtensionDefinition>& Extensions() const { return extensions; }

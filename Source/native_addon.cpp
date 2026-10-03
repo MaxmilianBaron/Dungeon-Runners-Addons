@@ -9,6 +9,7 @@
 #include "native_reader.h"
 #include "native_nameplates.h"
 #include "native_hotkeys.h"
+#include "native_controller.h"
 #include "native_cooldowns.h"
 #include "native_character_sheet.h"
 #include "native_mythic_sounds.h"
@@ -34,6 +35,7 @@ extern "C" void __cdecl MeterOverlayLayer(IDirect3DDevice9*,AddonUiLayer);
 extern "C" void __cdecl MeterOverlayEndFrame();
 extern "C" void __cdecl MeterOverlayInputTest(AddonInputTest);
 extern "C" void __cdecl MeterOverlayHotkeyTest(AddonHotkeyTest);
+extern "C" bool __cdecl MeterOverlayController(Controller::Settings*,const Controller::Status*,HWND*,bool*,IDirect3DDevice9*);
 extern "C" void __cdecl MeterOverlayInvalidate();
 extern "C" unsigned __cdecl MeterOverlayStatus();
 extern "C" bool __cdecl MeterOverlayEnabled();
@@ -71,6 +73,8 @@ static NativeMeter meter;
 static CursorCombat cursorCombat;
 static NativeBankSort bankSort;
 static NativeLoadouts loadouts;
+static NativeController controller;
+extern "C" void __cdecl MeterControllerRelease() { controller.Release(); }
 static NativeMoveLayout moveLayout;
 static MeterPacket snapshot{};
 static DungeonHistory history;
@@ -435,6 +439,15 @@ extern "C" uintptr_t __cdecl NameplateDispatch(unsigned kind,const HookRegisters
 
 static void RefreshUi(const NativeReader& reader) {
     const uint64_t now = GetTickCount64();
+    Controller::Settings controllerSettings;
+    HWND controllerWindow=nullptr;
+    bool controllerBlocked=false;
+    const auto controllerGraphics=reader.Pointer(image+0x533a44);
+    const auto controllerDevice=reinterpret_cast<IDirect3DDevice9*>(reader.Pointer(controllerGraphics+0x1c));
+    if (MeterOverlayController(&controllerSettings,nullptr,&controllerWindow,&controllerBlocked,controllerDevice)) {
+        controller.Service(reader,image,controllerSettings,controllerWindow,controllerBlocked,now);
+        MeterOverlayController(nullptr,&controller.Status(),nullptr,nullptr,nullptr);
+    } else controller.Release();
     const uintptr_t ui = reader.Pointer(image + 0x5314b0);
     const bool shown = reader.InWorld();
     MoveLayoutSettings layoutSettings;
@@ -614,6 +627,7 @@ static void Observe(unsigned kind, const HookRegisters& registers) {
         return;
     }
     if (kind == 2) {
+        controller.Release();
         std::lock_guard<std::recursive_mutex> lock(stateGate);
         mythicSounds.Reset(reader,image);
         cursorCombat.Reset();
