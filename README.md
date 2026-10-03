@@ -28,6 +28,7 @@
 - **Sort Bank Pages** — Sort one bank page or all unlocked pages by item type, appearance and armor set.
 - **Loadouts** — Save equipped gear and switch sets from Inventory or an open bank.
 - **Leaderboard** — Official Level 100, Gold, Time and PvP rankings via `ESC` → `Leaderboard`.
+- **Controller** — XInput movement, aiming, skills, consumables and menus; editable skill bindings, cursor sensitivity, stick deadzone and trigger threshold. Windows and Wine/Proton; Steam Deck uses the Steam Input Gamepad template.
 
 <details>
 <summary>Mac / Linux setup</summary>
