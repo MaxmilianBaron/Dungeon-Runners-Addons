@@ -2,6 +2,7 @@
 #include "native_meter.h"
 #include "addon_features.h"
 #include "native_ui.h"
+#include "low_hp_warning.h"
 #include <cctype>
 #include <cstdlib>
 #include <functional>
@@ -203,6 +204,18 @@ public:
         int32_t hp = 0;
         return player && Pointer(player) == image + 0x49b468 && avatar && Pointer(avatar) == image + 0x46de00 &&
             Pointer(avatar + 0x14) == player && Read(avatar + 0x2f0,hp) && hp > 0;
+    }
+    LocalHealthFrame LocalHealth(uint64_t now) const {
+        LocalHealthFrame result;
+        if (!InWorld()) return result;
+        const auto ui = Pointer(image + 0x5314b0);
+        const auto player = Pointer(Pointer(ui + 0x1b4) + 0xf8);
+        const auto avatar = Pointer(player + 0xb0);
+        if (!player || Pointer(player) != image + 0x49b468 || !avatar || Pointer(avatar) != image + 0x46de00 ||
+            Pointer(avatar + 0x14) != player || !Read(player + 0x98,result.player) ||
+            !Read(avatar + 0x2f0,result.current) || !Read(avatar + 0x14c,result.maximum)) return {};
+        result.sampledAt = now;
+        return result.Valid() ? result : LocalHealthFrame{};
     }
     bool Party(uint32_t& selfId, std::vector<MeterMember>& members) const {
         const uintptr_t ui = Pointer(image + 0x5314b0);

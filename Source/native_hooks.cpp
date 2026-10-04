@@ -24,6 +24,7 @@ void* WellLoginOriginal = nullptr;
 void* CharacterSheetVisualOriginal = nullptr;
 volatile uintptr_t CharacterSheetVisualTarget = 0;
 void* LootLabelOriginal = nullptr;
+void* LeftClickFallbackOriginal = nullptr;
 void* NameplateOptionsOriginal = nullptr;
 void* NameplateCreateOriginal = nullptr;
 void* NameplateBarsOriginal = nullptr;
@@ -33,6 +34,29 @@ void* NameplateRetireOriginal = nullptr;
 }
 
 static const unsigned DefaultMxcsr = 0x1f80;
+
+extern "C" __declspec(naked) void LeftClickFallbackHook() {
+    __asm push dword ptr [LeftClickFallbackOriginal]
+    __asm pushfd
+    __asm pushad
+    __asm mov ebx, esp
+    __asm sub esp, 528
+    __asm and esp, 0xfffffff0
+    __asm fxsave [esp]
+    __asm fninit
+    __asm ldmxcsr DefaultMxcsr
+    __asm cld
+    __asm mov esi, esp
+    __asm push ebx
+    __asm call LeftClickFallbackDispatch
+    __asm add esp, 4
+    __asm mov [ebx+36], eax
+    __asm fxrstor [esi]
+    __asm mov esp, ebx
+    __asm popad
+    __asm popfd
+    __asm ret
+}
 
 #define METER_STUB(Name, Original, Number) \
 extern "C" __declspec(naked) void Name() { \

@@ -53,6 +53,9 @@ extern "C" void __fastcall CharacterSheetVisualDraw(uintptr_t,uintptr_t,uintptr_
 extern "C" void LootLabelHook();
 extern "C" void* LootLabelOriginal;
 extern "C" uintptr_t __cdecl LootLabelDispatch(const HookRegisters*);
+extern "C" void LeftClickFallbackHook();
+extern "C" void* LeftClickFallbackOriginal;
+extern "C" uintptr_t __cdecl LeftClickFallbackDispatch(const HookRegisters*);
 extern "C" uintptr_t __cdecl NameplateDispatch(unsigned,const HookRegisters*);
 extern "C" void NameplateOptionsHook();
 extern "C" void NameplateCreateHook();

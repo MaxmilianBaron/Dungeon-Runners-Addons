@@ -25,6 +25,9 @@
 #include "wishing_well.h"
 #include "combat_cursor.h"
 #include "cursor_ring.h"
+#include "low_hp_warning.h"
+#include "health_vignette.h"
+#include "unbind_left_click.h"
 #include "bank_sort.h"
 #include "move_layout.h"
 #include "loadouts_store.h"
@@ -113,6 +116,16 @@ static std::filesystem::path cursorSettings;
 static std::string cursorMessage;
 static uint64_t cursorCombatUntil = 0;
 static CursorRing combatCursorRing, previewCursorRing;
+static LowHpSettings lowHpOptions, draftLowHpOptions;
+static LocalHealthFrame healthFrame;
+static HealthVignette healthVignette;
+static std::filesystem::path lowHpSettings;
+static std::string lowHpMessage;
+static uint64_t lowHpPreviewUntil = 0;
+static UnbindLeftClickSettings unbindOptions, draftUnbindOptions;
+static std::filesystem::path unbindSettings;
+static std::string unbindMessage;
+static bool unbindAvailable = false;
 static BankSortFrame bankFrame;
 static unsigned bankAction = 0;
 static bool bankEnabled = true, draftBankEnabled = true;
@@ -318,6 +331,20 @@ static bool SaveCursorSettings() {
     return written && output.good() && MoveFileExW(pending.c_str(),cursorSettings.c_str(),MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
 }
 
+template<class Settings> static bool SaveAddonOptions(const std::filesystem::path& path,const Settings& value) {
+    if (path.empty()) return false;
+    std::error_code error;
+    std::filesystem::create_directories(path.parent_path(),error);
+    if (error) return false;
+    auto pending = path; pending += L".pending." + std::to_wstring(GetCurrentProcessId());
+    std::ofstream output(pending,std::ios::trunc);
+    const bool written = value.Write(output);
+    output.close();
+    const bool saved = written && output.good() && MoveFileExW(pending.c_str(),path.c_str(),MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
+    if (!saved) std::filesystem::remove(pending,error);
+    return saved;
+}
+
 static bool SaveBankSettings() {
     if (bankSettings.empty()) return false;
     std::error_code error;
@@ -517,6 +544,7 @@ static LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wparam
 static void ShutdownUnlocked() {
     MeterControllerRelease();
     combatCursorRing.Reset(); previewCursorRing.Reset();
+    healthVignette.Reset();
     std::vector<MeterDetailRow>().swap(detailRows); std::vector<float>().swap(detailOffsets); cachedDetailRevision = UINT64_MAX;
     EndPanelResize();
     hotkeyInput.Reset();
@@ -1697,6 +1725,8 @@ static void DrawBankSort() {
 
 #include "loadouts_ui.h"
 #include "controller_ui.h"
+#include "low_hp_ui.h"
+#include "unbind_left_click_ui.h"
 
 static const char* CursorColorNames[] = {"Red","Yellow","White","Green","Cyan","Blue","Purple","Pink"};
 static const UiColor CursorColors[] = {UI_COLOR(255,32,32,255),UI_COLOR(255,220,32,255),UI_COLOR(255,255,255,255),UI_COLOR(64,255,64,255),UI_COLOR(32,230,255,255),UI_COLOR(80,128,255,255),UI_COLOR(180,80,255,255),UI_COLOR(255,80,180,255)};
@@ -2120,6 +2150,8 @@ static void DiscoverAddons(const std::filesystem::path& root) {
     if (addonRegistry.MoveEverything()) registeredAddons.push_back({"moveeverything","Moveeverything","Move player, party, target, chat, minimap and buff/curse panels.",OpenMoveSettings,DrawMoveSettings,nullptr});
     if (addonRegistry.Loadouts()) registeredAddons.push_back({"loadouts","Loadouts","Save equipment sets next to Inventory.",OpenLoadoutSettings,DrawLoadoutSettings,nullptr});
     if (addonRegistry.ControllerEnabled()) registeredAddons.push_back({"controller","Controller","Gamepad movement, combat, consumables and menus.",OpenControllerSettings,DrawControllerSettings,nullptr});
+    if (addonRegistry.LowHp()) registeredAddons.push_back({"low-hp-warning","Low HP Warning","Red screen edges with an adjustable HP threshold.",OpenLowHpSettings,DrawLowHpSettings,nullptr});
+    if (addonRegistry.UnbindLeft()) registeredAddons.push_back({"unbind-left-click","Unbind Left Click","Disable fallback basic attacks from left click.",OpenUnbindSettings,DrawUnbindSettings,nullptr});
     for (const auto& extension:addonRegistry.Extensions()) registeredAddons.push_back({extension.id,extension.name,extension.description,OpenExtensionSettings,DrawExtensionSettings,&extension,addonRegistry.Settings(extension)});
 }
 
@@ -2177,7 +2209,7 @@ static void DrawAddons() {
     }
     if (addonsOpen) {
         const float listHeight = std::clamp(static_cast<float>(registeredAddons.size())*48,48.0f,192.0f);
-        const float height = activeAddon ? (activeAddon->advanced || activeAddon->open == OpenControllerSettings ? 506.0f : activeAddon->open == OpenWellSettings ? 518.0f : activeAddon->open == OpenDamageSettings ? 390.0f : activeAddon->open == OpenNameplateSettings && !nameplatePage ? 340.0f : activeAddon->open == OpenMythicSettings ? 365.0f : activeAddon->open == OpenCursorSettings ? 347.0f : 289.0f) : 125+listHeight;
+        const float height = activeAddon ? (activeAddon->advanced || activeAddon->open == OpenControllerSettings ? 506.0f : activeAddon->open == OpenWellSettings ? 518.0f : activeAddon->open == OpenDamageSettings ? 390.0f : activeAddon->open == OpenNameplateSettings && !nameplatePage ? 340.0f : activeAddon->open == OpenMythicSettings ? 365.0f : activeAddon->open == OpenCursorSettings || activeAddon->open == OpenLowHpSettings ? 347.0f : 289.0f) : 125+listHeight;
         const bool controllerPanel=activeAddon && activeAddon->open==OpenControllerSettings;
         const auto preferred=controllerPanel ? UiPoint(std::max(buttonScale.x,1.5f),std::max(buttonScale.y,1.5f)) : buttonScale;
         const UiPoint scale = FitScale(preferred,UiPoint(350,height));
@@ -2206,6 +2238,12 @@ extern "C" __declspec(dllexport) int __cdecl MeterOverlayStart(const char* iniFi
     const auto addonsDirectory=std::filesystem::u8path(settingsFile).parent_path().parent_path();
     if (!LoadSkinData(addonsDirectory/L"Runtime"/L"ui.bin")) return 0;
     DiscoverAddons(addonsDirectory);
+    lowHpSettings = addonsDirectory / L"LowHPWarning" / L"settings.ini";
+    lowHpOptions = {}; healthFrame = {}; lowHpPreviewUntil = 0;
+    { std::ifstream input(lowHpSettings); lowHpOptions.Load(input); }
+    unbindSettings = addonsDirectory / L"UnbindLeftClick" / L"settings.ini";
+    unbindOptions = {}; unbindAvailable = false;
+    { std::ifstream input(unbindSettings); unbindOptions.Load(input); }
     controllerSettings=addonsDirectory/L"Controller"/L"settings.ini";
     controllerOptions={}; controllerStatus={};
     { std::ifstream input(controllerSettings); controllerOptions.Load(input); }
@@ -2390,6 +2428,7 @@ extern "C" void __cdecl MeterOverlayLayer(IDirect3DDevice9* device,AddonUiLayer 
     Ui::SetInputEnabled(InputAllowed(Ui::GetIO().MousePos,layer == AddonUiLayer::Menu));
     if (layer == AddonUiLayer::Meter) {
         help.text.clear();
+        DrawLowHpWarning(now);
         DrawControllerHints();
         DrawWellTimer();
         if (visible) DrawPanel(); else panelOptionsOpen=false;
@@ -2438,6 +2477,11 @@ extern "C" __declspec(dllexport) void __cdecl MeterOverlayRender(IDirect3DDevice
 }
 
 extern "C" bool __cdecl MeterOverlayCursorEnabled() { Lock lock; return addonRegistry.CombatCursor() && cursorOptions.enabled; }
+extern "C" bool __cdecl MeterOverlayLowHpEnabled() { Lock lock; return addonRegistry.LowHp() && lowHpOptions.enabled; }
+extern "C" void __cdecl MeterOverlayHealth(const LocalHealthFrame* value) { Lock lock; healthFrame = value && value->Valid() ? *value : LocalHealthFrame{}; }
+extern "C" bool __cdecl MeterOverlayUnbindInstalled() { Lock lock; return addonRegistry.UnbindLeft(); }
+extern "C" bool __cdecl MeterOverlayUnbindEnabled() { Lock lock; return addonRegistry.UnbindLeft() && unbindAvailable && unbindOptions.enabled; }
+extern "C" void __cdecl MeterOverlayUnbindAvailable(bool value) { Lock lock; unbindAvailable = value; }
 extern "C" bool __cdecl MeterOverlayController(Controller::Settings* settings,const Controller::Status* value,HWND* window,bool* blocked,IDirect3DDevice9* device) {
     Lock lock;
     const bool installed=addonRegistry.ControllerEnabled() && !shuttingDown;
@@ -2582,7 +2626,7 @@ extern "C" __declspec(dllexport) bool __cdecl MeterOverlayEnabled() {
 extern "C" __declspec(dllexport) void __cdecl MeterOverlayWorld(bool shown) {
     Lock lock;
     worldVisible = shown;
-    if (!shown) { characterSheetFrame = {}; cooldownFrame = {}; effectFrame = {}; cooldownHighlights.Reset(); }
+    if (!shown) { characterSheetFrame = {}; cooldownFrame = {}; effectFrame = {}; cooldownHighlights.Reset(); healthFrame = {}; lowHpPreviewUntil = 0; }
     if (!shown) {
         hotkeyInput.recording=false; hotkeyMessage.clear();
         EndPanelResize(); hitCount = 0; dragging = false; wellTimerArea = {};

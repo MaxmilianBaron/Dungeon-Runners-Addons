@@ -21,6 +21,7 @@
 #include "addon_api.h"
 #include "native_catalog.generated.h"
 #include "combat_cursor.h"
+#include "unbind_left_click.h"
 #include "native_bank_sort.h"
 #include "native_loadouts.h"
 #include "native_move_layout.h"
@@ -57,6 +58,11 @@ extern "C" void __cdecl MeterOverlayCharacterInputTest(AddonInputTest);
 extern "C" int __cdecl MeterOverlayMythicSettings(MythicSettings*,bool,unsigned*,HWND*,CustomSoundStatus,bool);
 extern "C" bool __cdecl MeterOverlayWellSettings(WellSettings*,WellUiAction*,const WellUiState*);
 extern "C" bool __cdecl MeterOverlayCursorEnabled();
+extern "C" bool __cdecl MeterOverlayLowHpEnabled();
+extern "C" void __cdecl MeterOverlayHealth(const LocalHealthFrame*);
+extern "C" bool __cdecl MeterOverlayUnbindInstalled();
+extern "C" bool __cdecl MeterOverlayUnbindEnabled();
+extern "C" void __cdecl MeterOverlayUnbindAvailable(bool);
 extern "C" void __cdecl MeterOverlayCursorCombat(uint64_t);
 extern "C" bool __cdecl MeterOverlayBankSettings(const BankSortFrame*,unsigned*,bool*);
 extern "C" bool __cdecl MeterOverlayMoveSettings(MoveLayoutSettings*,const MoveLayoutFrame*);
@@ -89,6 +95,7 @@ static NativeCharacterSheet characterSheet;
 static NativeMythicSounds mythicSounds;
 static NativeWishingWell wishingWell;
 static volatile LONG hideGold = 0;
+static volatile LONG unbindLeft = 0;
 static volatile LONG nameplateMask = 0;
 static SRWLOCK nameplateGate = SRWLOCK_INIT;
 static NameplateIndex nameplateIndex;
@@ -355,6 +362,15 @@ extern "C" uintptr_t __cdecl LootLabelDispatch(const HookRegisters* registers) {
     return next;
 }
 
+extern "C" uintptr_t __cdecl LeftClickFallbackDispatch(const HookRegisters* registers) {
+    const DWORD error = GetLastError();
+    const NativeReader reader(image,CopyMemoryChecked,LookupLabel);
+    const bool enabled = InterlockedCompareExchange(&ready,0,0) && InterlockedCompareExchange(&unbindLeft,0,0);
+    const auto next = LeftClickFallbackTarget(reader,image,registers->esi,enabled,reinterpret_cast<uintptr_t>(LeftClickFallbackOriginal));
+    SetLastError(error);
+    return next;
+}
+
 static uintptr_t VisibleControlAt(uintptr_t root,const int32_t* point) {
     using HitTest = uintptr_t (__thiscall*)(void*,const int32_t*,bool);
     __try { return reinterpret_cast<HitTest>(image + 0x281540)(reinterpret_cast<void*>(root),point,true); }
@@ -537,6 +553,9 @@ static void RefreshUi(const NativeReader& reader) {
         if (now >= nextHistory) { history.Share(historySnapshot,now); MeterOverlaySharedHistory(&historySnapshot); nextHistory=now+1000; }
     }
     MeterOverlayWorld(shown);
+    const auto health = shown && MeterOverlayLowHpEnabled() ? reader.LocalHealth(now) : LocalHealthFrame{};
+    MeterOverlayHealth(&health);
+    InterlockedExchange(&unbindLeft,MeterOverlayUnbindEnabled() ? 1 : 0);
     characterSheet.Prepare(reader,image,MeterOverlayCharacterSheetEnabled(),shown,now,SetSheetGeometry);
     InterlockedExchange(reinterpret_cast<volatile LONG*>(&CharacterSheetVisualTarget),static_cast<LONG>(characterSheet.VisualTarget()));
     int32_t uiWidth = 0, uiHeight = 0;
@@ -800,6 +819,14 @@ static BOOL CALLBACK InitializeAddon(PINIT_ONCE, PVOID, PVOID*) {
         MeterOverlayLoadoutInputTest(LoadoutInput);
         InterlockedExchange(&nameplateMask,static_cast<LONG>(MeterOverlayNameplates()));
         if (!InstallHooks()) throw std::runtime_error("Native hook validation failed; addon disabled");
+        if (MeterOverlayUnbindInstalled()) {
+            static NativePatchSet leftClickPatch;
+            const NativePatchSpec spec{reinterpret_cast<void*>(image+0x2aad0),reinterpret_cast<void*>(LeftClickFallbackHook),
+                &LeftClickFallbackOriginal,"8b4c2404575156e804f5ffff84c07403895e5cc20400",5};
+            const bool valid = Matches({0x2aaa0,"8bc32b465c3dc800000076378b463483f8017507b869000000eb0985c07511b86a000000568bcfe8c4f1ffff84c07510",nullptr,nullptr});
+            MeterOverlayUnbindAvailable(valid && leftClickPatch.Install(&spec,1));
+            InterlockedExchange(&unbindLeft,MeterOverlayUnbindEnabled() ? 1 : 0);
+        }
         std::ofstream output(status, std::ios::trunc);
         output << "Addons loaded inside DungeonRunners.exe\nClient SHA256: " << digest << "\nHooks: " << std::size(hooks) << "\nSkill labels: " << std::size(SkillLabels) << "\nZone definitions: " << std::size(DungeonZones) << "\n";
         HMODULE ownModule = nullptr;
