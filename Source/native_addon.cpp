@@ -930,6 +930,8 @@ static BOOL CALLBACK InitializeAddon(PINIT_ONCE, PVOID, PVOID*) {
         if (!ClientImageCompatible(path)) throw std::runtime_error("Required client code or layout differs; addon disabled");
         if (!VerifyCatalog(directory)) throw std::runtime_error("Skill data identity differs; addon disabled");
         image = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+        const NativeReader reader(image,CopyMemoryChecked,LookupLabel);
+        const bool mouseLookCompatible = MouseLookProfileMatches(reader,image);
         const auto settings = (addon / L"ui.ini").u8string();
         mythicSounds.Configure(directory / L"Addons" / L"MythicDropSounds");
         wishingWell.Configure(directory / L"Addons" / L"WishingWellTracker");
@@ -951,6 +953,7 @@ static BOOL CALLBACK InitializeAddon(PINIT_ONCE, PVOID, PVOID*) {
             MeterOverlayUnbindAvailable(valid && leftClickPatch.Install(&spec,1));
             InterlockedExchange(&unbindLeft,MeterOverlayUnbindEnabled() ? 1 : 0);
         }
+        bool mouseLookInstalled = false;
         if (MeterOverlayMouseLookInstalled()) {
             static NativePatchSet mouseLookPatches;
             MouseLookSelectContinue = image + 0x2a9f8;
@@ -960,11 +963,12 @@ static BOOL CALLBACK InitializeAddon(PINIT_ONCE, PVOID, PVOID*) {
                 {reinterpret_cast<void*>(image + 0x2a2b0),reinterpret_cast<void*>(MouseLookClickHook),&MouseLookClickOriginal,"83ec0853558b6c241456578bf86a008bc5e80ac004008b0d",5},
                 {reinterpret_cast<void*>(image + 0x2ee930),reinterpret_cast<void*>(MouseLookRightHook),&MouseLookRightOriginal,"33c038818d0000000f95c0c3",8}
             };
-            const NativeReader reader(image,CopyMemoryChecked,LookupLabel);
-            MeterOverlayMouseLookAvailable(MouseLookProfileMatches(reader,image) && mouseLookPatches.Install(specs,std::size(specs)));
+            mouseLookInstalled = mouseLookCompatible && mouseLookPatches.Install(specs,std::size(specs));
+            MeterOverlayMouseLookAvailable(mouseLookInstalled);
         }
         std::ofstream output(status, std::ios::trunc);
         output << "Addons loaded inside DungeonRunners.exe\nClient SHA256: " << digest << "\nHooks: " << std::size(hooks) << "\nSkill labels: " << std::size(SkillLabels) << "\nZone definitions: " << std::size(DungeonZones) << "\n";
+        output << "Mouse look hooks: " << (mouseLookInstalled ? "installed" : "unavailable") << '\n';
         HMODULE ownModule = nullptr;
         wchar_t ownPath[32768]{};
         if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, reinterpret_cast<LPCWSTR>(&InitializeAddon), &ownModule) && GetModuleFileNameW(ownModule, ownPath, static_cast<DWORD>(std::size(ownPath))))
