@@ -10,6 +10,8 @@
 #include "native_nameplates.h"
 #include "native_hotkeys.h"
 #include "native_controller.h"
+#include "native_mouse_look.h"
+#include "mouse_look_hooks.h"
 #include "native_cooldowns.h"
 #include "native_character_sheet.h"
 #include "native_mythic_sounds.h"
@@ -63,6 +65,9 @@ extern "C" void __cdecl MeterOverlayHealth(const LocalHealthFrame*);
 extern "C" bool __cdecl MeterOverlayUnbindInstalled();
 extern "C" bool __cdecl MeterOverlayUnbindEnabled();
 extern "C" void __cdecl MeterOverlayUnbindAvailable(bool);
+extern "C" bool __cdecl MeterOverlayMouseLookInstalled();
+extern "C" void __cdecl MeterOverlayMouseLookAvailable(bool);
+extern "C" bool __cdecl MeterOverlayMouseLook(HWND*,bool*);
 extern "C" void __cdecl MeterOverlayCursorCombat(uint64_t);
 extern "C" bool __cdecl MeterOverlayBankSettings(const BankSortFrame*,unsigned*,bool*);
 extern "C" bool __cdecl MeterOverlayMoveSettings(MoveLayoutSettings*,const MoveLayoutFrame*);
@@ -81,6 +86,11 @@ static NativeBankSort bankSort;
 static NativeLoadouts loadouts;
 static NativeController controller;
 extern "C" void __cdecl MeterControllerRelease() { controller.Release(); }
+static MouseLookGesture mouseLook;
+static std::recursive_mutex mouseLookGate;
+static volatile LONG mouseLookOn = 0;
+static volatile LONG mouseLookBlockedPress = 0;
+static thread_local bool mouseLookReleasing = false;
 static NativeMoveLayout moveLayout;
 static MeterPacket snapshot{};
 static DungeonHistory history;
@@ -387,6 +397,119 @@ static bool OverlayInput(float x,float y,bool menuLayer) {
     return reader.OverlayInput(VisibleControlAt(root,point),menuLayer);
 }
 
+static bool MouseLookForeground(HWND window) {
+    DWORD process = 0;
+    return window && IsWindow(window) && !IsIconic(window) && GetForegroundWindow() == window &&
+        GetWindowThreadProcessId(window,&process) == GetCurrentThreadId() && process == GetCurrentProcessId();
+}
+
+static bool MouseLookWorldPoint(HWND window) {
+    POINT point{};
+    RECT area{};
+    if (!GetCursorPos(&point) || GetAncestor(WindowFromPoint(point),GA_ROOT) != window ||
+        !ScreenToClient(window,&point) || !GetClientRect(window,&area) || !PtInRect(&area,point)) return false;
+    return OverlayInput(float(point.x) / float(area.right - area.left),float(point.y) / float(area.bottom - area.top),false);
+}
+
+static void MouseLookRestore(const MouseLookGesture& previous) {
+    if (!previous.Active() || mouseLookReleasing) return;
+    const NativeReader reader(image,CopyMemoryChecked,LookupLabel);
+    const auto context = MouseLookContext::Read(reader,image);
+    if (!previous.Owns(context.handler,context.mouse)) return;
+    mouseLookReleasing = true;
+    __try { MouseLookInvokeSelect(image + 0x2a9f0,context.handler,context.mouse); }
+    __except (EXCEPTION_EXECUTE_HANDLER) {}
+    mouseLookReleasing = false;
+}
+
+extern "C" void __cdecl MeterMouseLookRelease() {
+    MouseLookGesture previous;
+    {
+        std::lock_guard<std::recursive_mutex> lock(mouseLookGate);
+        previous = mouseLook;
+        mouseLook.Reset();
+    }
+    MouseLookRestore(previous);
+}
+
+extern "C" void __cdecl MeterMouseLookButton(bool down,bool consumed) {
+    if (!down) { InterlockedExchange(&mouseLookBlockedPress,0); return; }
+    HWND window = nullptr;
+    bool blocked = true;
+    bool allowed = false;
+    if (!consumed && InterlockedCompareExchange(&mouseLookOn,0,0) && MeterOverlayMouseLook(&window,&blocked) && !blocked && MouseLookForeground(window)) {
+        const NativeReader reader(image,CopyMemoryChecked,LookupLabel);
+        allowed = MouseLookContext::Read(reader,image).available && MouseLookWorldPoint(window);
+    }
+    InterlockedExchange(&mouseLookBlockedPress,allowed ? 0 : 1);
+    if (!allowed) MeterMouseLookRelease();
+}
+
+static void ServiceMouseLook(const NativeReader& reader) {
+    HWND window = nullptr;
+    bool blocked = true;
+    const bool enabled = MeterOverlayMouseLook(&window,&blocked);
+    const bool wasEnabled = InterlockedExchange(&mouseLookOn,enabled ? 1 : 0) != 0;
+    if (!enabled) { if (wasEnabled) MeterMouseLookRelease(); return; }
+    if (InterlockedCompareExchange(&mouseLookBlockedPress,0,0) && !(GetAsyncKeyState(GetSystemMetrics(SM_SWAPBUTTON) ? VK_LBUTTON : VK_RBUTTON) & 0x8000))
+        InterlockedExchange(&mouseLookBlockedPress,0);
+    const auto context = MouseLookContext::Read(reader,image);
+    const bool available = context.available && !blocked && !InterlockedCompareExchange(&mouseLookBlockedPress,0,0) && MouseLookForeground(window);
+    const bool worldPoint = available && MouseLookWorldPoint(window);
+    MouseLookGesture previous;
+    bool released = false;
+    {
+        std::lock_guard<std::recursive_mutex> lock(mouseLookGate);
+        previous = mouseLook;
+        released = !mouseLook.Update(context.handler,context.mouse,enabled,available,context.right,worldPoint,false) && previous.Active();
+    }
+    if (released) MouseLookRestore(previous);
+}
+
+extern "C" uintptr_t __cdecl MouseLookSelectDispatch(const HookRegisters* registers) {
+    const DWORD error = GetLastError();
+    uintptr_t next = MouseLookSelectContinue;
+    if (registers && !mouseLookReleasing && InterlockedCompareExchange(&ready,0,0) && InterlockedCompareExchange(&mouseLookOn,0,0)) {
+        HWND window = nullptr;
+        bool blocked = true;
+        const bool enabled = MeterOverlayMouseLook(&window,&blocked);
+        const NativeReader reader(image,CopyMemoryChecked,LookupLabel);
+        const auto context = MouseLookContext::Read(reader,image);
+        if (registers->esi == context.handler && registers->edi == context.mouse) {
+            const bool available = context.available && !blocked && !InterlockedCompareExchange(&mouseLookBlockedPress,0,0) && MouseLookForeground(window);
+            const bool worldPoint = available && MouseLookWorldPoint(window);
+            std::lock_guard<std::recursive_mutex> lock(mouseLookGate);
+            if (mouseLook.Update(context.handler,context.mouse,enabled,available,context.right,worldPoint,true)) next = image + 0x2aa67;
+        }
+    }
+    SetLastError(error);
+    return next;
+}
+
+extern "C" uintptr_t __cdecl MouseLookClickDispatch(const HookRegisters* registers) {
+    const DWORD error = GetLastError();
+    uintptr_t next = reinterpret_cast<uintptr_t>(MouseLookClickOriginal);
+    if (registers && InterlockedCompareExchange(&ready,0,0) && InterlockedCompareExchange(&mouseLookOn,0,0)) {
+        const NativeReader reader(image,CopyMemoryChecked,LookupLabel);
+        std::lock_guard<std::recursive_mutex> lock(mouseLookGate);
+        if (MouseLookBlocksClick(reader,mouseLook,registers->esp + 8,registers->eax)) next = reinterpret_cast<uintptr_t>(MouseLookSkipClick);
+    }
+    SetLastError(error);
+    return next;
+}
+
+extern "C" uintptr_t __cdecl MouseLookRightDispatch(const HookRegisters* registers) {
+    const DWORD error = GetLastError();
+    uintptr_t next = reinterpret_cast<uintptr_t>(MouseLookRightOriginal);
+    if (registers && InterlockedCompareExchange(&ready,0,0) && InterlockedCompareExchange(&mouseLookOn,0,0)) {
+        const NativeReader reader(image,CopyMemoryChecked,LookupLabel);
+        std::lock_guard<std::recursive_mutex> lock(mouseLookGate);
+        if (MouseLookMasksRight(reader,mouseLook,image,registers->esp + 8,registers->esi,registers->ecx)) next = reinterpret_cast<uintptr_t>(MouseLookRightReleased);
+    }
+    SetLastError(error);
+    return next;
+}
+
 static AddonHotkeyState OverlayHotkey(unsigned key,unsigned modifiers,bool activation) {
     NativeReader reader(image,CopyMemoryChecked,LookupLabel);
     return NativeHotkeys(reader,image).Check(key,modifiers,activation);
@@ -553,6 +676,7 @@ static void RefreshUi(const NativeReader& reader) {
         if (now >= nextHistory) { history.Share(historySnapshot,now); MeterOverlaySharedHistory(&historySnapshot); nextHistory=now+1000; }
     }
     MeterOverlayWorld(shown);
+    ServiceMouseLook(reader);
     const auto health = shown && MeterOverlayLowHpEnabled() ? reader.LocalHealth(now) : LocalHealthFrame{};
     MeterOverlayHealth(&health);
     InterlockedExchange(&unbindLeft,MeterOverlayUnbindEnabled() ? 1 : 0);
@@ -826,6 +950,18 @@ static BOOL CALLBACK InitializeAddon(PINIT_ONCE, PVOID, PVOID*) {
             const bool valid = Matches({0x2aaa0,"8bc32b465c3dc800000076378b463483f8017507b869000000eb0985c07511b86a000000568bcfe8c4f1ffff84c07510",nullptr,nullptr});
             MeterOverlayUnbindAvailable(valid && leftClickPatch.Install(&spec,1));
             InterlockedExchange(&unbindLeft,MeterOverlayUnbindEnabled() ? 1 : 0);
+        }
+        if (MeterOverlayMouseLookInstalled()) {
+            static NativePatchSet mouseLookPatches;
+            MouseLookSelectContinue = image + 0x2a9f8;
+            MouseLookSelectExit = image + 0x2aa99;
+            const NativePatchSpec specs[] = {
+                {reinterpret_cast<void*>(image + 0x2a9f0),reinterpret_cast<void*>(MouseLookSelectHook),&MouseLookSelectGateway,"85ff0f84a1000000807e78000f8480000000807e7a00740d",8},
+                {reinterpret_cast<void*>(image + 0x2a2b0),reinterpret_cast<void*>(MouseLookClickHook),&MouseLookClickOriginal,"83ec0853558b6c241456578bf86a008bc5e80ac004008b0d",5},
+                {reinterpret_cast<void*>(image + 0x2ee930),reinterpret_cast<void*>(MouseLookRightHook),&MouseLookRightOriginal,"33c038818d0000000f95c0c3",8}
+            };
+            const NativeReader reader(image,CopyMemoryChecked,LookupLabel);
+            MeterOverlayMouseLookAvailable(MouseLookProfileMatches(reader,image) && mouseLookPatches.Install(specs,std::size(specs)));
         }
         std::ofstream output(status, std::ios::trunc);
         output << "Addons loaded inside DungeonRunners.exe\nClient SHA256: " << digest << "\nHooks: " << std::size(hooks) << "\nSkill labels: " << std::size(SkillLabels) << "\nZone definitions: " << std::size(DungeonZones) << "\n";

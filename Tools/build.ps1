@@ -47,12 +47,12 @@ try {
     & cl.exe @options /LD (Join-Path $sourceDirectory 'addon_loader.cpp') /link /DYNAMICBASE /NXCOMPAT /OUT:d3d9.dll "/DEF:$sourceDirectory\d3d9.def"
     if ($LASTEXITCODE -ne 0) { throw 'Addon loader compilation failed' }
     $audioSources = @('audio.cpp','wave.cpp','mp3.cpp') | ForEach-Object { Join-Path $audioDirectory ('src\'+$_) }
-    & cl.exe @options /LD (Join-Path $sourceDirectory 'native_addon.cpp') (Join-Path $sourceDirectory 'native_hooks.cpp') (Join-Path $sourceDirectory 'overlay.cpp') (Join-Path $sourceDirectory 'AardvarkUI\ui.cpp') @audioSources /link /DYNAMICBASE /NXCOMPAT /OUT:Addons.dll "/DEF:$sourceDirectory\damage_meter.def" user32.lib gdi32.lib bcrypt.lib winhttp.lib
+    & cl.exe @options /LD (Join-Path $sourceDirectory 'native_addon.cpp') (Join-Path $sourceDirectory 'native_hooks.cpp') (Join-Path $sourceDirectory 'mouse_look_hooks.cpp') (Join-Path $sourceDirectory 'overlay.cpp') (Join-Path $sourceDirectory 'AardvarkUI\ui.cpp') @audioSources /link /DYNAMICBASE /NXCOMPAT /OUT:Addons.dll "/DEF:$sourceDirectory\damage_meter.def" user32.lib gdi32.lib bcrypt.lib winhttp.lib
     if ($LASTEXITCODE -ne 0) { throw 'Native addon compilation failed' }
 } finally { Pop-Location }
 Get-Item -LiteralPath (Join-Path $OutputDirectory 'd3d9.dll'),(Join-Path $OutputDirectory 'Addons.dll') | Select-Object FullName,Length
 
-foreach ($addon in @('DamageMeter','HideGoldLabels','CooldownTimers','Nameplates','BetterCharacterSheet','MythicDropSounds','WishingWellTracker','CursorCircle','SortBankPages','Moveeverything','Loadouts','Leaderboard','Controller','LowHPWarning','UnbindLeftClick')) {
+foreach ($addon in @('DamageMeter','HideGoldLabels','CooldownTimers','Nameplates','BetterCharacterSheet','MythicDropSounds','WishingWellTracker','CursorCircle','SortBankPages','Moveeverything','Loadouts','Leaderboard','Controller','EnhancedSettings')) {
     $destination = Join-Path $OutputDirectory ("Addons\"+$addon)
     New-Item -ItemType Directory -Path $destination -Force | Out-Null
     Copy-Item -LiteralPath (Join-Path $repositoryDirectory ("Addons\"+$addon+"\addon.ini")) -Destination $destination -Force

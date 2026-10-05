@@ -11,7 +11,7 @@ class AddonRegistry {
     std::vector<ExtensionSettings> settings;
     std::vector<ExtensionGetStatus> statuses;
     bool damage = false, money = false, cooldowns = false, nameplates = false, characterSheet = false, mythicSounds = false, wishingWell = false, combatCursor = false, bankSort = false, moveEverything = false, loadouts = false, leaderboard = false;
-    bool controller = false, lowHp = false, unbindLeft = false;
+    bool controller = false, lowHp = false, unbindLeft = false, enhanced = false;
     unsigned rejected = 0;
 
     static bool Plain(const char* value,size_t size) {
@@ -67,7 +67,7 @@ public:
         return true;
     }
     void Discover(const std::filesystem::path& root) {
-        extensions.clear(); settings.clear(); statuses.clear(); damage=money=cooldowns=nameplates=characterSheet=mythicSounds=wishingWell=combatCursor=bankSort=moveEverything=loadouts=leaderboard=controller=lowHp=unbindLeft=false; rejected=0;
+        extensions.clear(); settings.clear(); statuses.clear(); damage=money=cooldowns=nameplates=characterSheet=mythicSounds=wishingWell=combatCursor=bankSort=moveEverything=loadouts=leaderboard=controller=lowHp=unbindLeft=enhanced=false; rejected=0;
         std::error_code error;
         if (!Regular(root,true)) return;
         std::vector<std::filesystem::path> directories;
@@ -96,6 +96,8 @@ public:
             if (builtin=="Controller" && id=="controller") { controller=true; continue; }
             if (builtin=="LowHPWarning" && id=="low-hp-warning") { lowHp=true; continue; }
             if (builtin=="UnbindLeftClick" && id=="unbind-left-click") { unbindLeft=true; continue; }
+            if (builtin=="EnhancedSettings" && id=="enhanced-settings") { enhanced=true; continue; }
+            if (id=="enhanced-settings") { ++rejected; continue; }
             if (id=="low-hp-warning" || id=="unbind-left-click") { ++rejected; continue; }
             if (id=="controller") { ++rejected; continue; }
             if (builtin=="Nameplates" && id=="nameplates") { nameplates=true; continue; }
@@ -136,8 +138,9 @@ public:
     bool Loadouts() const { return loadouts; }
     bool Leaderboard() const { return leaderboard; }
     bool ControllerEnabled() const { return controller; }
-    bool LowHp() const { return lowHp; }
-    bool UnbindLeft() const { return unbindLeft; }
+    bool Enhanced() const { return enhanced || lowHp || unbindLeft; }
+    bool LowHp() const { return Enhanced(); }
+    bool UnbindLeft() const { return Enhanced(); }
     bool Nameplates() const { return nameplates; }
     unsigned Rejected() const { return rejected; }
     const std::vector<ExtensionDefinition>& Extensions() const { return extensions; }
