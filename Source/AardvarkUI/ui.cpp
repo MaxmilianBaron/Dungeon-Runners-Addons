@@ -336,6 +336,7 @@ bool Ui::IsWindowHovered(int) {
     return current->inputEnabled && !(window.flags&NoInputs) && Contains(window.clip,current->io.MousePos) && (current->hoveredRoot.empty() || current->hoveredRoot==window.root);
 }
 bool Ui::IsMouseHoveringRect(UiPoint a,UiPoint b) { return Contains({a,b},current->io.MousePos); }
+float Ui::MouseWheel() { return current->wheel; }
 UiDrawList* Ui::GetWindowDrawList() { return &current->draw; }
 UiDrawList* Ui::GetForegroundDrawList() { return &current->foreground; }
 UiPoint Ui::GetCursorScreenPos() { return Window().cursor; }

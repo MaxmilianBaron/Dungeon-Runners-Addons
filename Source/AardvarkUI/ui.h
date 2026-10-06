@@ -86,6 +86,7 @@ namespace Ui {
     bool IsItemActive();
     bool IsItemHovered();
     bool IsWindowHovered(int=0);
+    float MouseWheel();
     bool IsMouseHoveringRect(UiPoint,UiPoint);
     bool IsMouseDragging(int,float=0);
     bool IsMouseDoubleClicked(int);

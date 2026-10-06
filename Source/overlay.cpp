@@ -188,6 +188,8 @@ struct AddonDefinition {
 };
 static AddonRegistry addonRegistry;
 static std::vector<AddonDefinition> registeredAddons;
+static size_t libraryPage=0;
+static RECT libraryPreviousRect{}, libraryNextRect{};
 static int extensionDraft[ExtensionSettingsLimit]{};
 static unsigned extensionPage=0;
 static bool extensionReadable=false;
@@ -2147,6 +2149,7 @@ static void DrawExtensionSettings(UiPoint origin,UiPoint scale) {
 static void DiscoverAddons(const std::filesystem::path& root) {
     addonRegistry.Discover(root);
     registeredAddons.clear();
+    libraryPage=0;
     if (addonRegistry.Damage()) registeredAddons.push_back({"damage-meter","Damage Meter","Combat damage, DPS and party reports.",OpenDamageSettings,DrawDamageSettings,nullptr});
     if (addonRegistry.Money()) registeredAddons.push_back({"hide-gold-labels","Hide Gold Labels","Hide gold labels in own and party loot.",OpenLootSettings,DrawLootSettings,nullptr});
     if (addonRegistry.Cooldowns()) registeredAddons.push_back({"cooldown-timers","Cooldown Timers","Skill cooldowns and Buff / Curse durations.",OpenCooldownSettings,DrawCooldownSettings,nullptr});
@@ -2166,12 +2169,23 @@ static void DiscoverAddons(const std::filesystem::path& root) {
 static void DrawLibrary(UiPoint origin,UiPoint scale,float listHeight) {
     auto point = [origin,scale](float x,float y) { return At(origin,scale,x,y); };
     UiDrawList* draw = Ui::GetWindowDrawList();
+    const size_t pages=std::max<size_t>(1,(registeredAddons.size()+3)/4);
+    libraryPage=std::min(libraryPage,pages-1);
+    if (Ui::IsWindowHovered() && Ui::IsMouseHoveringRect(point(20,58),point(330,58+listHeight))) {
+        if (Ui::MouseWheel()<0 && libraryPage+1<pages) ++libraryPage;
+        else if (Ui::MouseWheel()>0 && libraryPage) --libraryPage;
+    }
     Heading(draw,"Addons",point(34,20),scale,280);
+    const auto pageLabel=std::to_string(libraryPage+1)+" / "+std::to_string(pages);
+    nativeSkin.AlignedText(draw,pageLabel.c_str(),point(235,24),{80*scale.x,20*scale.y},{scale.x*.7f,scale.y*.7f},false,BodyColor);
+    libraryEntryRect=lootEntryRect=libraryPreviousRect=libraryNextRect={};
     Ui::SetCursorScreenPos(point(20,58));
     if (Ui::BeginChild("addon-list",UiPoint(310 * scale.x,listHeight * scale.y),0,0)) {
-        for (const auto& addon : registeredAddons) {
+        const size_t end=std::min(registeredAddons.size(),(libraryPage+1)*4);
+        for (size_t index=libraryPage*4;index<end;++index) {
+            const auto& addon=registeredAddons[index];
             const UiPoint cursor = Ui::GetCursorScreenPos();
-            const UiPoint row(cursor.x+(registeredAddons.size()*48>listHeight ? 0 : 5*scale.x),cursor.y);
+            const UiPoint row(cursor.x+5*scale.x,cursor.y);
             if (SkinControl(addon.id,addon.name,row,UiPoint(300 * scale.x,39 * scale.y),scale,addon.open == OpenDamageSettings ? &libraryEntryRect : addon.open == OpenLootSettings ? &lootEntryRect : nullptr)) {
                 activeAddon = &addon;
                 addon.open();
@@ -2182,6 +2196,18 @@ static void DrawLibrary(UiPoint origin,UiPoint scale,float listHeight) {
         }
     }
     Ui::EndChild();
+    if (pages>1) for (unsigned side=0;side<2;++side) {
+        const auto at=point(side ? 276.0f : 38.0f,68+listHeight);
+        const UiPoint size(36*scale.x,36*scale.y);
+        const bool enabled=side ? libraryPage+1<pages : libraryPage>0;
+        Ui::SetCursorScreenPos(at); Ui::BeginDisabled(!enabled);
+        if (Ui::InvisibleButton(side ? "next-addons" : "previous-addons",size)) { if (side) ++libraryPage; else --libraryPage; }
+        (side ? libraryNextRect : libraryPreviousRect)=Rectangle(at,size);
+        nativeSkin.Arrow(draw,{at.x+6*scale.x,at.y+6*scale.y},{scale.x*1.2f,scale.y*1.2f},side!=0,Ui::IsItemActive());
+        if (!enabled) draw->AddRectFilled(at,{at.x+size.x,at.y+size.y},UI_COLOR(0,0,0,135));
+        if (Ui::IsItemHovered()) QueueHelp(side ? "Next addons." : "Previous addons.",point(355,68+listHeight),scale,origin.x);
+        Ui::EndDisabled();
+    }
     if (DrawSkinControl("Back",point(104.5f,68+listHeight),scale,&libraryBackRect)) addonsOpen = false;
     if (Ui::IsItemHovered()) QueueHelp("Returns to the game's Escape menu.",point(355,68+listHeight),scale,origin.x);
 }
