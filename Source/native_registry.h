@@ -1,4 +1,5 @@
 #pragma once
+#include "windows_compat.h"
 #include <algorithm>
 #include <filesystem>
 #include <set>
@@ -105,7 +106,7 @@ public:
             if (!builtin.empty() || id=="damage-meter" || id=="hide-gold-labels" || id=="hide-money-boxes" || id=="cooldown-timers" || id=="nameplates" || id=="better-character-sheet" || id=="mythic-drop-sounds" || id=="wishing-well-tracker" || id=="cursor-circle" || id=="sort-bank-pages" || id=="moveeverything" || id=="loadouts" || id=="leaderboard") { ++rejected; continue; }
             const auto modulePath=directory/L"Addon.dll";
             if (!Regular(modulePath)) { ++rejected; continue; }
-            const auto module=LoadLibraryExW(modulePath.c_str(),nullptr,LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR|LOAD_LIBRARY_SEARCH_SYSTEM32);
+            const auto module=WindowsCompat::LoadLibrary(modulePath.c_str());
             const auto initialize=module ? reinterpret_cast<ExtensionInitialize>(GetProcAddress(module,"DungeonRunnersAddonInitialize")) : nullptr;
             const auto game=root.parent_path().wstring(),folder=directory.wstring();
             const ExtensionHost host{sizeof(ExtensionHost),ExtensionApiVersion,game.c_str(),folder.c_str()};

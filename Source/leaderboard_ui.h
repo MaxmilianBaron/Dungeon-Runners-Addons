@@ -1,4 +1,5 @@
 #pragma once
+#include "windows_compat.h"
 
 static Leaderboard::Feed LeaderboardFeed() {
     using namespace Leaderboard;
@@ -57,7 +58,7 @@ static void DrawLeaderboard() {
             if (SkinControl("period",leaderboardWeek ? "This week" : "All time",point(24,119),{122*scale.x,29*scale.y},scale,&leaderboardPeriodRect)) { leaderboardWeek=!leaderboardWeek; leaderboardPage=0; }
             BodyText(draw,category==Category::Wins ? "Wins among the official rated top 100" : "Official rated PvP standings",point(157,125),scale,MutedColor);
         } else BodyText(draw,category==Category::Level ? "First to reach level 100, in official order" : category==Category::Gold ? "Total gold held by each character" : "Total recorded play time",point(24,125),scale,MutedColor);
-        const uint64_t now=GetTickCount64();
+        const uint64_t now=WindowsCompat::Milliseconds();
         Ui::BeginDisabled(result.loading || now<result.nextAttempt);
         if (SkinControl("refresh",result.loading ? "Loading" : "Refresh",point(550,119),{86*scale.x,29*scale.y},scale,&leaderboardRefreshRect)) leaderboardClient->Request(feed,true);
         Ui::EndDisabled();

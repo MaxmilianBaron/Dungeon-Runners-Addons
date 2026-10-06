@@ -1,4 +1,5 @@
 #pragma once
+#include "windows_compat.h"
 #include <windows.h>
 #include <mmsystem.h>
 #include <algorithm>
@@ -40,7 +41,7 @@ class CustomSoundDevice {
     }
 public:
     CustomSoundDevice() {
-        library = LoadLibraryExW(L"winmm.dll",nullptr,LOAD_LIBRARY_SEARCH_SYSTEM32);
+        library = WindowsCompat::SystemLibrary(L"winmm.dll");
         if (library) {
             open = reinterpret_cast<decltype(open)>(GetProcAddress(library,"waveOutOpen"));
             close = reinterpret_cast<decltype(close)>(GetProcAddress(library,"waveOutClose"));

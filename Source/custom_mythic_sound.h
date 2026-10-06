@@ -1,4 +1,5 @@
 #pragma once
+#include "windows_compat.h"
 #include <windows.h>
 #include <commdlg.h>
 #include <objbase.h>
@@ -90,7 +91,7 @@ class CustomMythicSound {
     static void Browse(State& state,const Request& request) {
         state.browsing = true;
         state.status = CustomSoundStatus::Browsing;
-        const auto library = LoadLibraryExW(L"comdlg32.dll",nullptr,LOAD_LIBRARY_SEARCH_SYSTEM32);
+        const auto library = WindowsCompat::SystemLibrary(L"comdlg32.dll");
         const auto select = library ? reinterpret_cast<BOOL(WINAPI*)(LPOPENFILENAMEW)>(GetProcAddress(library,"GetOpenFileNameW")) : nullptr;
         if (!select) state.status = CustomSoundStatus::Unavailable;
         while (select && Current(state,request.serial)) {

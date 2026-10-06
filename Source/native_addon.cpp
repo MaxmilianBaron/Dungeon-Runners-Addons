@@ -1,6 +1,7 @@
 #include <windows.h>
+#include "windows_compat.h"
 #include <d3d9.h>
-#include <bcrypt.h>
+#include "windows_hash.h"
 #include <filesystem>
 #include <fstream>
 #include <mutex>
@@ -75,7 +76,7 @@ extern "C" void __cdecl MeterOverlayBankInputTest(AddonInputTest);
 extern "C" bool __cdecl MeterOverlayLoadouts(const LoadoutFrame*,LoadoutCommand*,bool*);
 extern "C" void __cdecl MeterOverlayLoadoutInputTest(AddonInputTest);
 
-static INIT_ONCE bootstrap = INIT_ONCE_STATIC_INIT;
+static WindowsCompat::Once bootstrap;
 static volatile LONG ready = 0;
 static volatile LONG collecting = 0;
 static uintptr_t image = 0;
@@ -90,7 +91,7 @@ static MouseLookGesture mouseLook;
 static std::recursive_mutex mouseLookGate;
 static volatile LONG mouseLookOn = 0;
 static volatile LONG mouseLookBlockedPress = 0;
-static thread_local bool mouseLookReleasing = false;
+static WindowsCompat::ThreadData<bool> mouseLookReleasing;
 static NativeMoveLayout moveLayout;
 static MeterPacket snapshot{};
 static DungeonHistory history;
@@ -107,12 +108,12 @@ static NativeWishingWell wishingWell;
 static volatile LONG hideGold = 0;
 static volatile LONG unbindLeft = 0;
 static volatile LONG nameplateMask = 0;
-static SRWLOCK nameplateGate = SRWLOCK_INIT;
+static volatile LONG nameplateGate = 0;
 static NameplateIndex nameplateIndex;
 static PartyReportQueue partyReports;
 static const char* reportStatus = "";
 struct PendingHit { uintptr_t unit, damage; int32_t hp; bool valid; };
-static thread_local PendingHit pending{};
+static WindowsCompat::ThreadData<PendingHit> pendingHit;
 
 static bool CopyMemoryChecked(uintptr_t address, void* destination, size_t length) {
     if (address < 0x10000 || length > 4096 || address > UINTPTR_MAX - length) return false;
@@ -126,30 +127,9 @@ static const char* LookupLabel(const char* path) {
     return found != end && std::strcmp(found->path, path) == 0 ? found->label : nullptr;
 }
 
-class Hash {
-    BCRYPT_ALG_HANDLE algorithm = nullptr;
-    BCRYPT_HASH_HANDLE hash = nullptr;
-public:
-    explicit Hash(const wchar_t* name) {
-        if (BCryptOpenAlgorithmProvider(&algorithm, name, nullptr, 0) < 0 || BCryptCreateHash(algorithm, &hash, nullptr, 0, nullptr, 0, 0) < 0) {
-            if (algorithm) BCryptCloseAlgorithmProvider(algorithm, 0);
-            algorithm = nullptr;
-            throw std::runtime_error("Hash initialization failed");
-        }
-    }
-    ~Hash() { if (hash) BCryptDestroyHash(hash); if (algorithm) BCryptCloseAlgorithmProvider(algorithm, 0); }
-    void Add(const unsigned char* bytes, ULONG size) { if (BCryptHashData(hash, const_cast<PUCHAR>(bytes), size, 0) < 0) throw std::runtime_error("Hash input failed"); }
-    std::string Finish(ULONG size) {
-        unsigned char digest[32]{};
-        if (size > sizeof(digest) || BCryptFinishHash(hash, digest, size, 0) < 0) throw std::runtime_error("Hash finalization failed");
-        std::string result;
-        const char* hex = "0123456789abcdef";
-        for (ULONG i = 0; i < size; ++i) { result += hex[digest[i] >> 4]; result += hex[digest[i] & 15]; }
-        return result;
-    }
-};
+using Hash = WindowsHash;
 
-static std::string FileHash(const std::filesystem::path& path, const wchar_t* algorithm, ULONG size) {
+static std::string FileHash(const std::filesystem::path& path, ALG_ID algorithm, ULONG size) {
     std::ifstream input(path, std::ios::binary);
     if (!input) throw std::runtime_error("Required file cannot be read");
     Hash hash(algorithm);
@@ -160,10 +140,10 @@ static std::string FileHash(const std::filesystem::path& path, const wchar_t* al
 }
 
 static bool VerifyCatalog(const std::filesystem::path& directory) {
-    if (FileHash(directory / L"game.pki", BCRYPT_SHA1_ALGORITHM, 20) != CatalogPkiSha1) return false;
+    if (FileHash(directory / L"game.pki", CALG_SHA1, 20) != CatalogPkiSha1) return false;
     std::ifstream input(directory / L"game.pkg", std::ios::binary);
     if (!input) return false;
-    Hash hash(BCRYPT_SHA256_ALGORITHM);
+    Hash hash(WindowsHash::Sha256Algorithm);
     unsigned char block[32768];
     for (const auto& range : SkillRanges) {
         input.seekg(static_cast<std::streamoff>(range.offset));
@@ -412,14 +392,15 @@ static bool MouseLookWorldPoint(HWND window) {
 }
 
 static void MouseLookRestore(const MouseLookGesture& previous) {
-    if (!previous.Active() || mouseLookReleasing) return;
+    bool* releasing=mouseLookReleasing.Get();
+    if (!previous.Active() || !releasing || *releasing) return;
     const NativeReader reader(image,CopyMemoryChecked,LookupLabel);
     const auto context = MouseLookContext::Read(reader,image);
     if (!previous.Owns(context.handler,context.mouse)) return;
-    mouseLookReleasing = true;
+    *releasing = true;
     __try { MouseLookInvokeSelect(image + 0x2a9f0,context.handler,context.mouse); }
     __except (EXCEPTION_EXECUTE_HANDLER) {}
-    mouseLookReleasing = false;
+    *releasing = false;
 }
 
 extern "C" void __cdecl MeterMouseLookRelease() {
@@ -469,7 +450,8 @@ static void ServiceMouseLook(const NativeReader& reader) {
 extern "C" uintptr_t __cdecl MouseLookSelectDispatch(const HookRegisters* registers) {
     const DWORD error = GetLastError();
     uintptr_t next = MouseLookSelectContinue;
-    if (registers && !mouseLookReleasing && InterlockedCompareExchange(&ready,0,0) && InterlockedCompareExchange(&mouseLookOn,0,0)) {
+    const bool* releasing=mouseLookReleasing.Get();
+    if (registers && releasing && !*releasing && InterlockedCompareExchange(&ready,0,0) && InterlockedCompareExchange(&mouseLookOn,0,0)) {
         HWND window = nullptr;
         bool blocked = true;
         const bool enabled = MeterOverlayMouseLook(&window,&blocked);
@@ -550,7 +532,7 @@ extern "C" uintptr_t __cdecl NameplateDispatch(unsigned kind,const HookRegisters
     void* originals[] = {NameplateOptionsOriginal,NameplateCreateOriginal,NameplateBarsOriginal,NameplateNameOriginal,NameplatePosseOriginal,NameplateRetireOriginal};
     uintptr_t next = kind < std::size(originals) ? reinterpret_cast<uintptr_t>(originals[kind]) : 0;
     const unsigned mask = static_cast<unsigned>(InterlockedCompareExchange(&nameplateMask,0,0));
-    if (registers && InterlockedCompareExchange(&ready,0,0) && TryAcquireSRWLockExclusive(&nameplateGate)) {
+    if (registers && InterlockedCompareExchange(&ready,0,0) && InterlockedCompareExchange(&nameplateGate,1,0)==0) {
         NativeReader reader(image,CopyMemoryChecked,LookupLabel);
         const uintptr_t stack = registers->esp + 8;
         if (kind == 5) nameplateIndex.Forget(registers->edi);
@@ -570,14 +552,14 @@ extern "C" uintptr_t __cdecl NameplateDispatch(unsigned kind,const HookRegisters
                 }
             }
         }
-        ReleaseSRWLockExclusive(&nameplateGate);
+        InterlockedExchange(&nameplateGate,0);
     }
     SetLastError(error);
     return next;
 }
 
 static void RefreshUi(const NativeReader& reader) {
-    const uint64_t now = GetTickCount64();
+    const uint64_t now = WindowsCompat::Milliseconds();
     Controller::Settings controllerSettings;
     HWND controllerWindow=nullptr;
     bool controllerBlocked=false;
@@ -719,11 +701,12 @@ static void Observe(unsigned kind, const HookRegisters& registers) {
     }
     if (kind == 8 || kind == 9) {
         std::lock_guard<std::recursive_mutex> lock(stateGate);
-        if (kind == 8) mythicSounds.Drop(reader,image,registers.ebx,GetTickCount64());
-        else mythicSounds.InventoryDrop(reader,image,registers.esi,GetTickCount64());
+        if (kind == 8) mythicSounds.Drop(reader,image,registers.ebx,WindowsCompat::Milliseconds());
+        else mythicSounds.InventoryDrop(reader,image,registers.esi,WindowsCompat::Milliseconds());
         return;
     }
     if (kind == 0) {
+        auto* local=pendingHit.Get();if(!local){Fault("Measurement stopped: thread data unavailable");return;}auto& pending=*local;
         pending = {};
         if (!InterlockedCompareExchange(&collecting, 0, 0)) return;
         pending.unit = registers.ebx;
@@ -733,6 +716,7 @@ static void Observe(unsigned kind, const HookRegisters& registers) {
         return;
     }
     if (kind == 1) {
+        auto* local=pendingHit.Get();if(!local){Fault("Measurement stopped: thread data unavailable");return;}auto& pending=*local;
         const auto before = pending;
         pending = {};
         if (!before.valid || !InterlockedCompareExchange(&collecting, 0, 0)) return;
@@ -748,7 +732,7 @@ static void Observe(unsigned kind, const HookRegisters& registers) {
         if (!hit.sourceId && !hit.targetId && !hit.targetPetOwnerId) return;
         hit.pet = hit.sourceId && !reader.PlayerId(source);
         std::lock_guard<std::recursive_mutex> lock(stateGate);
-        const uint64_t now = GetTickCount64();
+        const uint64_t now = WindowsCompat::Milliseconds();
         if (MeterOverlayCursorEnabled()) {
             cursorCombat.Hit(hit.sourceId,hit.targetId,hit.targetPetOwnerId,hit.before,hit.after,now);
             MeterOverlayCursorCombat(cursorCombat.Until());
@@ -782,7 +766,7 @@ static void Observe(unsigned kind, const HookRegisters& registers) {
         inWorld = false;
         uiPrepared = false;
         nextRoster = nextSnapshot = 0;
-        pending = {};
+        pendingHit.ReleaseCurrent();
         InterlockedExchange(&collecting, 0);
         reportStatus = partyReports.Pending() ? "Report cancelled by map transition." : "";
         partyReports.Cancel();
@@ -829,7 +813,7 @@ static void Observe(unsigned kind, const HookRegisters& registers) {
         else return;
         if (!reader.InWorld()) return;
         if (layer == AddonUiLayer::CharacterSheet) {
-            const auto frame = MeterOverlayCharacterSheetEnabled() ? characterSheet.Frame(reader,image,GetTickCount64()) : CharacterSheetFrame{};
+            const auto frame = MeterOverlayCharacterSheetEnabled() ? characterSheet.Frame(reader,image,WindowsCompat::Milliseconds()) : CharacterSheetFrame{};
             MeterOverlayCharacterSheet(&frame);
         }
         if (layer == AddonUiLayer::Effects) {
@@ -913,7 +897,7 @@ static bool InstallHooks() {
     return false;
 }
 
-static BOOL CALLBACK InitializeAddon(PINIT_ONCE, PVOID, PVOID*) {
+static BOOL CALLBACK InitializeAddon() {
     wchar_t executable[32768]{};
     const DWORD chars = GetModuleFileNameW(nullptr, executable, static_cast<DWORD>(std::size(executable)));
     if (!chars || chars >= std::size(executable)) return TRUE;
@@ -925,8 +909,8 @@ static BOOL CALLBACK InitializeAddon(PINIT_ONCE, PVOID, PVOID*) {
         const auto addon = directory / L"Addons" / L"DamageMeter";
         std::filesystem::create_directories(addon);
         status = addon / L"status.txt";
-        const auto archive = ArchiveMeterReports(directory, addon / L"reports", [](const auto& file) { return FileHash(file, BCRYPT_SHA256_ALGORITHM, 32); });
-        const auto digest = FileHash(path, BCRYPT_SHA256_ALGORITHM, 32);
+        const auto archive = ArchiveMeterReports(directory, addon / L"reports", [](const auto& file) { return FileHash(file, WindowsHash::Sha256Algorithm, 32); });
+        const auto digest = FileHash(path, WindowsHash::Sha256Algorithm, 32);
         if (!ClientImageCompatible(path)) throw std::runtime_error("Required client code or layout differs; addon disabled");
         if (!VerifyCatalog(directory)) throw std::runtime_error("Skill data identity differs; addon disabled");
         image = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
@@ -972,7 +956,7 @@ static BOOL CALLBACK InitializeAddon(PINIT_ONCE, PVOID, PVOID*) {
         HMODULE ownModule = nullptr;
         wchar_t ownPath[32768]{};
         if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, reinterpret_cast<LPCWSTR>(&InitializeAddon), &ownModule) && GetModuleFileNameW(ownModule, ownPath, static_cast<DWORD>(std::size(ownPath))))
-            output << "Addon SHA256: " << FileHash(ownPath, BCRYPT_SHA256_ALGORITHM, 32) << "\nAddon base: " << std::hex << reinterpret_cast<uintptr_t>(ownModule) << std::dec << '\n';
+            output << "Addon SHA256: " << FileHash(ownPath, WindowsHash::Sha256Algorithm, 32) << "\nAddon base: " << std::hex << reinterpret_cast<uintptr_t>(ownModule) << std::dec << '\n';
         SYSTEMTIME now{};
         GetSystemTime(&now);
         output << "Process: " << GetCurrentProcessId() << "\nStarted UTC: " << now.wYear << '-' << now.wMonth << '-' << now.wDay << 'T' << now.wHour << ':' << now.wMinute << ':' << now.wSecond << "\n";
@@ -985,11 +969,13 @@ static BOOL CALLBACK InitializeAddon(PINIT_ONCE, PVOID, PVOID*) {
 
 extern "C" BOOL WINAPI DungeonRunnersAddonsInitialize(uint32_t version) {
     if (version != DungeonRunnersAddonsApiVersion) return FALSE;
-    try { InitOnceExecuteOnce(&bootstrap, InitializeAddon, nullptr, nullptr); } catch (...) { return FALSE; }
+    try { bootstrap.Run(InitializeAddon); } catch (...) { return FALSE; }
     return InterlockedCompareExchange(&ready, 0, 0) ? TRUE : FALSE;
 }
 
 BOOL WINAPI DllMain(HINSTANCE, DWORD reason, LPVOID) {
-    if (reason == DLL_PROCESS_DETACH) { InterlockedExchange(&ready, 0); InterlockedExchange(&collecting, 0); }
+    if (reason == DLL_PROCESS_ATTACH) {if(!pendingHit.Initialize())return FALSE;if(!mouseLookReleasing.Initialize()){pendingHit.Shutdown();return FALSE;}}
+    if (reason == DLL_THREAD_DETACH) {pendingHit.ReleaseCurrent();mouseLookReleasing.ReleaseCurrent();}
+    if (reason == DLL_PROCESS_DETACH) { InterlockedExchange(&ready, 0); InterlockedExchange(&collecting, 0); pendingHit.Shutdown();mouseLookReleasing.Shutdown(); }
     return TRUE;
 }

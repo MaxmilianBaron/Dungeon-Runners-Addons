@@ -1,4 +1,5 @@
 #pragma once
+#include "windows_compat.h"
 #include "AardvarkUI/ui.h"
 #include <algorithm>
 #include <cmath>
@@ -20,7 +21,7 @@ public:
         if (!device || !draw || !std::isfinite(size.x) || !std::isfinite(size.y) || size.x <= 0 || size.y <= 0 || !intensity || intensity > 100) return;
         if (owner != device) { Reset(); owner = device; }
         if (!texture) {
-            const auto now = GetTickCount64();
+            const auto now = WindowsCompat::Milliseconds();
             if (now < retryAt) return;
             retryAt = now + 1000;
             constexpr unsigned side = 128;

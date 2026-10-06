@@ -2,6 +2,9 @@
 /Tests/
 /Tools/*
 !/Tools/build.ps1
+!/Tools/build_https.ps1
+!/Tools/Test-WindowsImports.ps1
+!/Tools/windows-xp-imports.json
 !/Tools/build_bank_catalog.py
 !/Tools/build_client_compatibility.py
 !/Tools/build_native_catalog.py

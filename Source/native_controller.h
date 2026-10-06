@@ -1,4 +1,5 @@
 #pragma once
+#include "windows_compat.h"
 #include <windows.h>
 #include <Xinput.h>
 #include "controller.h"
@@ -51,7 +52,7 @@ class NativeController {
         if (!attempted) {
             attempted=true;
             for (auto name:{L"xinput1_4.dll",L"xinput1_3.dll",L"xinput9_1_0.dll"}) {
-                const auto module=LoadLibraryExW(name,nullptr,LOAD_LIBRARY_SEARCH_SYSTEM32);
+                const auto module=WindowsCompat::SystemLibrary(name);
                 if (!module) continue;
                 getState=reinterpret_cast<GetState>(GetProcAddress(module,"XInputGetState"));
                 if (getState) break;

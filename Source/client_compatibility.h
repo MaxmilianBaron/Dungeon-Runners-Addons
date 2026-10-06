@@ -1,6 +1,6 @@
 #pragma once
 #include <windows.h>
-#include <bcrypt.h>
+#include "windows_hash.h"
 #include <filesystem>
 #include <fstream>
 #include <vector>
@@ -8,19 +8,8 @@
 #include <client_compatibility.generated.h>
 
 inline bool ClientRangeMatches(const unsigned char* bytes, unsigned size, const ClientProtectedRange& range) {
-    BCRYPT_ALG_HANDLE algorithm = nullptr;
-    BCRYPT_HASH_HANDLE hash = nullptr;
-    unsigned char digest[32]{};
-    bool good = BCryptOpenAlgorithmProvider(&algorithm,BCRYPT_SHA256_ALGORITHM,nullptr,0) >= 0;
-    good = good && BCryptCreateHash(algorithm,&hash,nullptr,0,nullptr,0,0) >= 0;
-    good = good && BCryptHashData(hash,const_cast<PUCHAR>(bytes),size,0) >= 0;
-    good = good && BCryptFinishHash(hash,digest,sizeof(digest),0) >= 0;
-    if(hash) BCryptDestroyHash(hash);
-    if(algorithm) BCryptCloseAlgorithmProvider(algorithm,0);
-    if(!good) return false;
-    char hex[65]{};
-    for(unsigned i=0;i<32;++i) { hex[i*2]="0123456789abcdef"[digest[i]>>4];hex[i*2+1]="0123456789abcdef"[digest[i]&15]; }
-    for(const auto expected:range.hashes) if(expected && std::strcmp(expected,hex)==0) return true;
+    try { const auto digest=WindowsHash::Sha256(bytes,size);for(const auto expected:range.hashes) if(expected && digest==expected) return true; }
+    catch (...) { return false; }
     return false;
 }
 

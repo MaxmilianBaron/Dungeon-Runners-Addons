@@ -14,10 +14,14 @@ public:
     wchar_t pending=0;
     static std::string Utf8(const std::wstring& value) {
         if (value.empty()) return {};
-        const int length=WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,value.data(),static_cast<int>(value.size()),nullptr,0,nullptr,nullptr);
+        for (size_t i=0;i<value.size();i++) {
+            if (High(value[i])) { if (i+1>=value.size() || !Low(value[i+1])) return {}; ++i; }
+            else if (Low(value[i])) return {};
+        }
+        const int length=WideCharToMultiByte(CP_UTF8,0,value.data(),static_cast<int>(value.size()),nullptr,0,nullptr,nullptr);
         if (length<=0) return {};
         std::string out(static_cast<size_t>(length),'\0');
-        WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,value.data(),static_cast<int>(value.size()),out.data(),length,nullptr,nullptr);
+        if (WideCharToMultiByte(CP_UTF8,0,value.data(),static_cast<int>(value.size()),out.data(),length,nullptr,nullptr)!=length) return {};
         return out;
     }
     void Open(const std::string& name) {

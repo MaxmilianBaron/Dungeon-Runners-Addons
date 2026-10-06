@@ -1,3 +1,4 @@
+#include "../windows_compat.h"
 #include "ui.h"
 #include <windowsx.h>
 #include <algorithm>
@@ -259,7 +260,7 @@ static void SaveWindows(UiContext& state) {
     }
     output.close();
     if (output.good() && MoveFileExW(pending.c_str(),path.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)) state.dirty=false;
-    state.savedAt=GetTickCount64();
+    state.savedAt=WindowsCompat::Milliseconds();
 }
 UiContext* Ui::CreateContext(HWND window,IDirect3DDevice9* device,const char* settings) {
     auto state=std::make_unique<UiContext>(); state->window=window; state->device=device; state->settings=settings ? settings : "";
@@ -433,6 +434,6 @@ void Ui::Flush() {
 void Ui::EndFrame() {
     auto& state=*current;
     if (state.up) state.active.clear();
-    if (state.dirty && !state.io.MouseDown[0] && GetTickCount64()-state.savedAt>1000) SaveWindows(state);
+    if (state.dirty && !state.io.MouseDown[0] && WindowsCompat::Milliseconds()-state.savedAt>1000) SaveWindows(state);
 }
 void Ui::Render() { Flush(); EndFrame(); }

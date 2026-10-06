@@ -1,4 +1,5 @@
 #pragma once
+#include "windows_compat.h"
 #include "AardvarkUI/ui.h"
 #include <algorithm>
 #include <cmath>
@@ -26,7 +27,7 @@ public:
         if (!std::isfinite(nextExtent) || nextExtent > 1024) return;
         const bool same = owner == device && radius == nextRadius && scale == nextScale && color == nextColor;
         if (!same || !texture) {
-            const auto now = GetTickCount64();
+            const auto now = WindowsCompat::Milliseconds();
             if (same && now < retryAt) return;
             Reset(); owner = device; radius = nextRadius; scale = nextScale; color = nextColor; extent = nextExtent; retryAt = now + 1000;
             for (side = 8; side < unsigned(2 * extent); side *= 2) {}

@@ -1,4 +1,5 @@
 #pragma once
+#include "windows_compat.h"
 #include <windows.h>
 #include <atomic>
 #include <cstdint>
@@ -49,15 +50,14 @@ private:
         }
     };
     std::shared_ptr<State> state;
-    static void CALLBACK Run(PTP_CALLBACK_INSTANCE instance,void* callbackData) noexcept {
+    static DWORD WINAPI Run(void* callbackData) noexcept {
         std::unique_ptr<std::shared_ptr<State>> lifetime(static_cast<std::shared_ptr<State>*>(callbackData));
         auto& data=**lifetime;
-        CallbackMayRunLong(instance);
         for (;;) {
             Records records;
             {
                 std::lock_guard<std::mutex> lock(data.gate);
-                if (!data.queued) { data.running=false; SetEvent(data.idle); return; }
+                if (!data.queued) { data.running=false; SetEvent(data.idle); return 0; }
                 records=std::move(data.pending);
                 data.queued=false;
             }
@@ -72,16 +72,16 @@ private:
                     data.queued=data.running=false;
                     SetEvent(data.idle);
                 }
-                return;
+                return 0;
             }
         }
     }
     static bool PinCallback() {
-        static const bool pinned=[] {
+        static WindowsCompat::Once pinned;
+        return pinned.Run([] {
             HMODULE module=nullptr;
             return GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_PIN,reinterpret_cast<LPCWSTR>(&Run),&module)!=FALSE;
-        }();
-        return pinned;
+        });
     }
 public:
     explicit HistoryWriter(const std::filesystem::path& file,uint32_t magic,WriteFunction write=Write):state(std::make_shared<State>()) {
@@ -109,7 +109,7 @@ public:
         if (state->running) return true;
         state->running=true;
         ResetEvent(state->idle);
-        if (!TrySubmitThreadpoolCallback(Run,callbackData.get(),nullptr)) {
+        if (!QueueUserWorkItem(Run,callbackData.get(),WT_EXECUTELONGFUNCTION)) {
             state->error.store(GetLastError());
             retired=std::move(state->pending); state->queued=state->running=false;
             SetEvent(state->idle);

@@ -1,4 +1,5 @@
 #include <windows.h>
+#include "windows_compat.h"
 #include <windowsx.h>
 #include <d3d9.h>
 #include <algorithm>
@@ -48,7 +49,7 @@ static unsigned controllerPage=0;
 
 
 static CRITICAL_SECTION gate;
-static INIT_ONCE gateOnce = INIT_ONCE_STATIC_INIT;
+static WindowsCompat::Once gateOnce;
 static MeterPacket packet{};
 static MeterPacket pendingPacket{};
 static uint64_t detailRevision = 0;
@@ -426,13 +427,13 @@ static void EndPanelResize() {
     SavePanelSize();
 }
 
-static BOOL CALLBACK InitializeGate(PINIT_ONCE, PVOID, PVOID*) {
+static BOOL CALLBACK InitializeGate() {
     InitializeCriticalSection(&gate);
     return TRUE;
 }
 
 struct Lock {
-    Lock() { InitOnceExecuteOnce(&gateOnce, InitializeGate, nullptr, nullptr); EnterCriticalSection(&gate); }
+    Lock() { gateOnce.Run(InitializeGate); EnterCriticalSection(&gate); }
     ~Lock() { LeaveCriticalSection(&gate); }
 };
 
@@ -491,7 +492,7 @@ static LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wparam
             if (bankFrame.busy) {
                 if ((message == WM_KEYDOWN || message == WM_KEYUP) && wparam == VK_ESCAPE) { bankAction = 3; consumeEscapeUp = false; nativeBankClose = true; }
                 else if (message == WM_KEYDOWN || message == WM_KEYUP || message == WM_CHAR) consume = true;
-                else if (message >= WM_MOUSEFIRST && message <= WM_MOUSELAST) {
+                else if (message >= WM_MOUSEFIRST && message <= WindowsCompat::MouseHorizontalWheel) {
                     POINT point{GET_X_LPARAM(lparam),GET_Y_LPARAM(lparam)};
                     const auto display = Ui::GetIO().DisplaySize;
                     const bool closeMouse = message == WM_MOUSEMOVE || message == WM_LBUTTONDOWN || message == WM_LBUTTONUP;
@@ -522,13 +523,13 @@ static LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wparam
                 const bool down = message == WM_LBUTTONDOWN || message == WM_RBUTTONDOWN || message == WM_MBUTTONDOWN || message == WM_XBUTTONDOWN || message == WM_LBUTTONDBLCLK;
                 const bool up = message == WM_LBUTTONUP || message == WM_RBUTTONUP || message == WM_MBUTTONUP || message == WM_XBUTTONUP;
                 LPARAM position = lparam;
-                if (message == WM_MOUSEWHEEL || message == WM_MOUSEHWHEEL) {
+                if (message == WM_MOUSEWHEEL || message == WindowsCompat::MouseHorizontalWheel) {
                     POINT point{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
                     ScreenToClient(window, &point);
                     position = MAKELPARAM(point.x, point.y);
                 }
                 const POINT pointer{GET_X_LPARAM(position),GET_Y_LPARAM(position)};
-                const bool mouse = message >= WM_MOUSEFIRST && message <= WM_MOUSELAST;
+                const bool mouse = message >= WM_MOUSEFIRST && message <= WindowsCompat::MouseHorizontalWheel;
                 const bool allowed = !mouse || InputAllowed({static_cast<float>(pointer.x),static_cast<float>(pointer.y)},addonsOpen || leaderboardOpen || PtInRect(&addonsButtonRect,pointer) || PtInRect(&leaderboardButtonRect,pointer));
                 if (!allowed) { Ui::ClearInput(); dragging = false; EndPanelResize(); }
                 const bool dismissOptions = allowed && down && panelOptionsOpen && !PtInRect(&panelArea,pointer);
@@ -1125,7 +1126,7 @@ static void DrawPanel() {
     const bool optionsExpanded = panelOptionsOpen;
     const MeterView& view = packet.views[mode+direction*2];
     const UiPoint display = Ui::GetIO().DisplaySize;
-    const char* status = packet.status[0] ? packet.status : panelSizeSaveFailed ? "Panel size could not be saved." : !measurementEnabled ? "Measurement paused" : GetTickCount64() - lastUpdate > 3000 ? "Waiting for combat data" : "";
+    const char* status = packet.status[0] ? packet.status : panelSizeSaveFailed ? "Panel size could not be saved." : !measurementEnabled ? "Measurement paused" : WindowsCompat::Milliseconds() - lastUpdate > 3000 ? "Waiting for combat data" : "";
     const UiPoint scale = MeterScale(UiPoint(330,300));
     const auto entries=DisplayRows(view);
     const unsigned rows=std::max(1u,std::min(12u,static_cast<unsigned>(entries.size())));
@@ -1701,7 +1702,7 @@ static void DrawBankSort() {
     if (!addonRegistry.BankSort() || (!bankEnabled && !bankFrame.busy) || !bankFrame.visible || addonsOpen || reportOpen) { lastMessage.clear(); messageUntil = 0; return; }
     if (lastMessage != bankFrame.message) {
         lastMessage = bankFrame.message;
-        messageUntil = !lastMessage.empty() && !bankFrame.busy ? GetTickCount64()+8000 : 0;
+        messageUntil = !lastMessage.empty() && !bankFrame.busy ? WindowsCompat::Milliseconds()+8000 : 0;
     }
     const auto scale = GameScale();
     const float width = bankFrame.width, height = bankFrame.height;
@@ -1730,7 +1731,7 @@ static void DrawBankSort() {
             Ui::EndDisabled();
         }
         const auto* status = bankFrame.message.empty() ? "Sort Page: current page. Sort Pages: fill from Page 1. Groups by item type and appearance." : bankFrame.message.c_str();
-        if (Ui::IsWindowHovered() || GetTickCount64() < messageUntil) QueueHelp(status,At(origin,scale,width+5,0),scale,origin.x,true);
+        if (Ui::IsWindowHovered() || WindowsCompat::Milliseconds() < messageUntil) QueueHelp(status,At(origin,scale,width+5,0),scale,origin.x,true);
     }
     Ui::End();
 }
@@ -1768,7 +1769,7 @@ static void DrawCursorSettings(UiPoint origin,UiPoint scale) {
 }
 
 static bool CombatCursorPosition(UiPoint& center) {
-    if (!addonRegistry.CombatCursor() || !cursorOptions.enabled || !worldVisible || GetTickCount64() >= cursorCombatUntil || !gameWindow || GetForegroundWindow() != gameWindow) return false;
+    if (!addonRegistry.CombatCursor() || !cursorOptions.enabled || !worldVisible || WindowsCompat::Milliseconds() >= cursorCombatUntil || !gameWindow || GetForegroundWindow() != gameWindow) return false;
     POINT pointer{};
     RECT client{};
     if (!GetCursorPos(&pointer) || !ScreenToClient(gameWindow,&pointer) || !GetClientRect(gameWindow,&client) || !PtInRect(&client,pointer) || client.right <= 0 || client.bottom <= 0) return false;
@@ -2425,7 +2426,7 @@ extern "C" __declspec(dllexport) int __cdecl MeterOverlayUpdate(const void* inpu
     catch (...) { return 0; }
     ++detailRevision;
     packet.status[sizeof(packet.status)-1]=0;
-    lastUpdate = GetTickCount64();
+    lastUpdate = WindowsCompat::Milliseconds();
     return 1;
 }
 
@@ -2445,7 +2446,7 @@ extern "C" void __cdecl MeterOverlayLayer(IDirect3DDevice9* device,AddonUiLayer 
             if (!meterFont->LoadAtlas(nativeSkin.FontTexture(),SkinAdvance.data(),SkinAdvance.size(),valueFont)) { meterFont.reset(); nativeSkin.Release(); }
         }
     }
-    const uint64_t now = GetTickCount64();
+    const uint64_t now = WindowsCompat::Milliseconds();
     Ui::SetCurrentContext(context);
     if (layer == AddonUiLayer::Meter) {
         if (nativeFrame) Ui::EndFrame();
@@ -2571,7 +2572,7 @@ extern "C" void __cdecl MeterOverlayCooldowns(const CooldownFrame* input) {
     Lock lock;
     if (input && ValidTimerFrame(*input) && worldVisible) {
         cooldownFrame = *input;
-        cooldownHighlights.Update(cooldownFrame,GetTickCount64(),cooldownsEnabled && cooldownReady);
+        cooldownHighlights.Update(cooldownFrame,WindowsCompat::Milliseconds(),cooldownsEnabled && cooldownReady);
     } else { cooldownFrame = {}; cooldownHighlights.Reset(); }
 }
 extern "C" bool __cdecl MeterOverlayEffectsEnabled() { Lock lock; return addonRegistry.Cooldowns() && cooldownsEnabled && effectTimers; }

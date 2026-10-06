@@ -1,5 +1,5 @@
 #pragma once
-#include <bcrypt.h>
+#include "windows_hash.h"
 #include <filesystem>
 #include <fstream>
 #include <vector>
@@ -17,19 +17,9 @@ static bool LoadSkinData(const std::filesystem::path& path) {
     std::vector<unsigned char> data(static_cast<size_t>(fileSize));
     std::ifstream input(path,std::ios::binary);
     if (!input.read(reinterpret_cast<char*>(data.data()),data.size())) return false;
-    BCRYPT_ALG_HANDLE algorithm = nullptr;
-    BCRYPT_HASH_HANDLE hash = nullptr;
-    unsigned char digest[32]{};
-    bool valid = BCryptOpenAlgorithmProvider(&algorithm,BCRYPT_SHA256_ALGORITHM,nullptr,0) >= 0;
-    if (valid) valid = BCryptCreateHash(algorithm,&hash,nullptr,0,nullptr,0,0) >= 0;
-    if (valid) valid = BCryptHashData(hash,data.data(),static_cast<ULONG>(data.size()),0) >= 0;
-    if (valid) valid = BCryptFinishHash(hash,digest,sizeof(digest),0) >= 0;
-    if (hash) BCryptDestroyHash(hash);
-    if (algorithm) BCryptCloseAlgorithmProvider(algorithm,0);
-    if (!valid) return false;
-    char hex[65]{};
-    for (size_t i=0;i<32;++i) { hex[i*2]="0123456789abcdef"[digest[i]>>4]; hex[i*2+1]="0123456789abcdef"[digest[i]&15]; }
-    if (std::strcmp(hex,legacy ? SkinLegacyFileSha256 : SkinFileSha256) || std::memcmp(data.data(),legacy ? "DRUI0001" : "DRUI0002",8)) return false;
+    try { if (WindowsHash::Sha256(data.data(),static_cast<DWORD>(data.size()))!=(legacy ? SkinLegacyFileSha256 : SkinFileSha256)) return false; }
+    catch (...) { return false; }
+    if (std::memcmp(data.data(),legacy ? "DRUI0001" : "DRUI0002",8)) return false;
     std::array<std::vector<unsigned char>,7> parts;
     const size_t count = legacy ? 5 : 7;
     size_t offset = 8 + count * 4;

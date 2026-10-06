@@ -1,10 +1,12 @@
 #include <windows.h>
+#include "windows_compat.h"
 #include <d3d9.h>
 #include <cstdio>
 #include <cwchar>
 #include "addon_api.h"
 
-static INIT_ONCE bootstrap = INIT_ONCE_STATIC_INIT;
+static WindowsCompat::Once bootstrap;
+static WindowsCompat::ThreadData<bool> loaderActive;
 static HMODULE graphicsD3D = nullptr;
 static HMODULE damageMeter = nullptr;
 static IDirect3D9* (WINAPI* createD3D)(UINT) = nullptr;
@@ -30,7 +32,7 @@ static void WriteStatus(const wchar_t* directory, const char* message, DWORD err
     CloseHandle(output);
 }
 
-static BOOL CALLBACK InitializeLoader(PINIT_ONCE, PVOID, PVOID*) {
+static BOOL CALLBACK InitializeLoader() {
     wchar_t directory[MAX_PATH]{}, path[MAX_PATH]{};
     DWORD length = GetModuleFileNameW(nullptr, directory, MAX_PATH);
     bool game = false;
@@ -60,11 +62,8 @@ static BOOL CALLBACK InitializeLoader(PINIT_ONCE, PVOID, PVOID*) {
         length = GetSystemDirectoryW(system, MAX_PATH);
         if (!length || length >= MAX_PATH || !JoinPath(path, system, L"d3d9.dll")) return TRUE;
     }
-    DWORD previousMode = 0;
-    bool modeChanged = SetThreadErrorMode(GetThreadErrorMode() | SEM_FAILCRITICALERRORS, &previousMode) != 0;
-    graphicsD3D = LoadLibraryExW(path, nullptr, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
+    graphicsD3D = WindowsCompat::LoadLibrary(path);
     const DWORD graphicsError = GetLastError();
-    if (modeChanged) SetThreadErrorMode(previousMode, nullptr);
     if (!graphicsD3D) {
         if (game) WriteStatus(directory, chained ? "Cannot load d3d9.previous.dll; original file was preserved" : "Cannot load system d3d9.dll", graphicsError);
         return TRUE;
@@ -83,10 +82,8 @@ static BOOL CALLBACK InitializeLoader(PINIT_ONCE, PVOID, PVOID*) {
         WriteStatus(directory, "Addon path is too long; graphics remain available", ERROR_FILENAME_EXCED_RANGE);
         return TRUE;
     }
-    modeChanged = SetThreadErrorMode(GetThreadErrorMode() | SEM_FAILCRITICALERRORS, &previousMode) != 0;
-    damageMeter = LoadLibraryExW(path, nullptr, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
+    damageMeter = WindowsCompat::LoadLibrary(path);
     const DWORD loadError = GetLastError();
-    if (modeChanged) SetThreadErrorMode(previousMode, nullptr);
     if (!damageMeter) {
         WriteStatus(directory, "DamageMeter is unavailable; graphics remain available", loadError);
         return TRUE;
@@ -105,13 +102,20 @@ static BOOL CALLBACK InitializeLoader(PINIT_ONCE, PVOID, PVOID*) {
 }
 
 extern "C" IDirect3D9* WINAPI Direct3DCreate9(UINT version) {
-    static thread_local bool active = false;
-    if (active) return nullptr;
-    active = true;
-    InitOnceExecuteOnce(&bootstrap, InitializeLoader, nullptr, nullptr);
+    bool* active=loaderActive.Get();
+    if (!active || *active) return nullptr;
+    *active = true;
+    bootstrap.Run(InitializeLoader);
     IDirect3D9* result = createD3D ? createD3D(version) : nullptr;
-    active = false;
+    *active = false;
     return result;
 }
 
 extern "C" DWORD WINAPI DungeonRunnersAddonsLoaderVersion() { return 2; }
+
+BOOL WINAPI DllMain(HINSTANCE,DWORD reason,LPVOID) {
+    if(reason==DLL_PROCESS_ATTACH)return loaderActive.Initialize();
+    if(reason==DLL_THREAD_DETACH)loaderActive.ReleaseCurrent();
+    if(reason==DLL_PROCESS_DETACH)loaderActive.Shutdown();
+    return TRUE;
+}

@@ -184,8 +184,10 @@ struct HuffmanTables {
     }
 };
 
+const HuffmanTables huffmanTables;
+
 void spectrum(Bits& input, Granule& g, const Bands& b, const Header& h) {
-    static const HuffmanTables tables;
+    const auto& tables=huffmanTables;
     constexpr unsigned extra[] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,2,3,4,6,8,10,13,4,5,6,7,8,9,11,13};
     const unsigned boundary0 = g.block == 2 ? (h.rate == 8000 ? 72 : 36) : b.long_lines[g.region0 + 1];
     const unsigned boundary1 = g.block ? 576 : b.long_lines[g.region0 + g.region1 + 2];
@@ -274,12 +276,14 @@ void stereo(Granule& left, Granule& right, const Header& h, const Bands& b) {
     }
 }
 
+const TransformTables transformTables;
+
 struct Synthesis {
     double overlap[2][576]{};
     double history[2][1024]{};
     unsigned head[2]{};
     void granule(Granule& g, unsigned channel, const Header& h, float* pcm) {
-        static const TransformTables t;
+        const auto& t=transformTables;
         auto& xr = g.spectral;
         const unsigned long_subbands = g.block == 2 ? (g.mixed ? 2 : 0) : 32;
         for (unsigned sb = 1; sb < long_subbands; ++sb) for (unsigned n = 0; n < 8; ++n) {

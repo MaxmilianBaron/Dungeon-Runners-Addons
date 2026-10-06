@@ -1,4 +1,5 @@
 #pragma once
+#include "windows_compat.h"
 
 static void OpenEnhancedSettings() {
     draftEnhancedOptions = {lowHpOptions,unbindOptions.enabled,mouseLookEnabled};
@@ -25,7 +26,7 @@ static void DrawEnhancedSettings(UiPoint origin,UiPoint scale) {
     const int opacity = OptionRow("Intensity:",intensity.c_str(),point(10,210),scale,"Opacity at the screen edges. The center stays clear; the warning does not flash.",point(355,210),origin.x);
     if (opacity) health.intensity = unsigned(std::clamp(int(health.intensity) + opacity * 5,10,90));
     BodyText(draw,"Each option works independently. Mouse look uses the game's camera controls. Preview shows the HP warning for 5 seconds.",point(34,258),UiPoint(scale.x*.85f,scale.y*.85f),BodyColor,280 * scale.x);
-    if (DrawSkinControl("Preview",point(104,324),scale)) lowHpPreviewUntil = GetTickCount64() + 5000;
+    if (DrawSkinControl("Preview",point(104,324),scale)) lowHpPreviewUntil = WindowsCompat::Milliseconds() + 5000;
     if (!enhancedMessage.empty()) BodyText(draw,enhancedMessage.c_str(),point(34,371),UiPoint(scale.x*.85f,scale.y*.85f),GoldColor,282 * scale.x);
     if (DrawSkinControl("Okay",point(24,400),scale,&okayRect)) {
         if (SaveAddonOptions(enhancedSettings,draftEnhancedOptions)) {

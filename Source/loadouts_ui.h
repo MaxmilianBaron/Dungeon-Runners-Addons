@@ -1,4 +1,5 @@
 #pragma once
+#include "windows_compat.h"
 
 static void QueueLoadout(LoadoutCommand::Kind kind) {
     loadoutCommand={}; loadoutCommand.kind=kind; loadoutCommand.owner=loadoutFrame.owner;
@@ -209,7 +210,7 @@ static void DrawLoadouts() {
                 draw->PushClipRect(At(at,scale,6,2),At(at,scale,contentWidth-6,26));
                 if (caret!=selected) draw->AddRectFilled({textAt.x+std::min(caret,selected)-offset,at.y+4*scale.y},{textAt.x+std::max(caret,selected)-offset,at.y+24*scale.y},UI_COLOR(115,86,19,180));
                 BodyText(draw,text.c_str(),{textAt.x-offset,textAt.y},scale);
-                if ((GetTickCount64()/500)%2==0) draw->AddLine({textAt.x+caret-offset,at.y+5*scale.y},{textAt.x+caret-offset,at.y+23*scale.y},GoldColor,scale.x);
+                if ((WindowsCompat::Milliseconds()/500)%2==0) draw->AddLine({textAt.x+caret-offset,at.y+5*scale.y},{textAt.x+caret-offset,at.y+23*scale.y},GoldColor,scale.x);
                 draw->PopClipRect();
                 if (LoadoutButton("rename-save","Save name",origin,scale,padding,86,152)) RenameLoadout();
                 if (LoadoutButton("rename-cancel","Cancel",origin,scale,184,86,152)) { loadoutRenaming=false; loadoutMessage.clear(); }
