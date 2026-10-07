@@ -8,7 +8,7 @@ static void QueueLoadout(LoadoutCommand::Kind kind) {
 static void CaptureLoadout(int index) {
     QueueLoadout(LoadoutCommand::Kind::Capture); loadoutCapture=index;
     loadoutOpen=true;
-    loadoutMessage="Saving current equipment...";
+    loadoutMessage="Saving equipment and hotbar...";
 }
 static void AcceptLoadoutResponse() {
     if (loadoutFrame.response==loadoutResponse) return;
@@ -127,7 +127,7 @@ static void DrawLoadouts() {
     const auto display=Ui::GetIO().DisplaySize;
     const auto gameScale=GameScale();
     const UiPoint title((loadoutFrame.titleX+loadoutFrame.titleWidth*.5f)*gameScale.x,loadoutFrame.titleY*gameScale.y);
-    const bool busy=loadoutFrame.busy || bankFrame.busy || loadoutCapture!=-2 || loadoutCommand.kind==LoadoutCommand::Kind::Equip;
+    const bool busy=loadoutFrame.busy || bankFrame.busy || inventoryFrame.busy || loadoutCapture!=-2 || loadoutCommand.kind==LoadoutCommand::Kind::Equip;
     for (unsigned i=0;i<2;++i) {
         const UiPoint at(title.x+(i ? 82.0f : -146.0f)*gameScale.x,title.y+(loadoutFrame.titleHeight-22)*.5f*gameScale.y);
         const UiPoint size((i ? 24.0f : 66.0f)*gameScale.x,22*gameScale.y);
@@ -135,12 +135,12 @@ static void DrawLoadouts() {
         Ui::SetNextWindowPos(at); Ui::SetNextWindowSize(size);
         if (Ui::Begin(i ? "##LoadoutAdd" : "##LoadoutList",nullptr,SurfaceFlags|Ui::NoSavedSettings)) {
             RegisterHitArea(); (i ? loadoutAddButton : loadoutListButton)=Rectangle(at,size);
-            Ui::BeginDisabled(i && (busy || loadoutRenaming || !loadoutStore.Ready() || loadoutStore.sets.size()>=12));
+            Ui::BeginDisabled(inventoryFrame.busy || (i && (busy || loadoutRenaming || !loadoutStore.Ready() || loadoutStore.sets.size()>=12)));
             if (LoadoutButton("button",i ? "+" : "Loadouts",at,gameScale,0,0,i ? 24.0f : 66.0f,22)) {
                 if (i) CaptureLoadout(-1);
                 else if (loadoutOpen) CloseLoadouts(); else loadoutOpen=true;
             }
-            if (Ui::IsItemHovered()) QueueHelp(i ? "Save the gear you are wearing as a new loadout." : "Equip or manage your saved loadouts.",At(at,gameScale,0,26),gameScale,at.x);
+            if (Ui::IsItemHovered()) QueueHelp(i ? "Save your equipped gear and hotbar skills as a new loadout." : "Equip or manage your saved loadouts.",At(at,gameScale,0,26),gameScale,at.x);
             Ui::EndDisabled();
         }
         Ui::End();
@@ -231,7 +231,7 @@ static void DrawLoadouts() {
                 if (HoverArea(at,extent) && !ref.name.empty()) QueueHelp(ref.name.c_str(),At(origin,scale,width+4,y),scale,origin.x);
             }
             Ui::BeginDisabled(busy || loadoutRenaming);
-            if (LoadoutButton("update","Save current gear",origin,scale,padding,418,154)) CaptureLoadout(loadoutEditing);
+            if (LoadoutButton("update","Save gear + skills",origin,scale,padding,418,154)) CaptureLoadout(loadoutEditing);
             if (LoadoutButton("delete",loadoutDelete ? "Confirm" : "Delete",origin,scale,186,418,72)) {
                 if (!loadoutDelete) loadoutDelete=true;
                 else {
@@ -242,19 +242,22 @@ static void DrawLoadouts() {
             }
             Ui::EndDisabled();
             if (LoadoutButton("back","Back",origin,scale,266,418,70)) loadoutEditor=loadoutRenaming=false;
-            const auto text=loadoutMessage.empty() ? "Save current gear replaces this loadout with what you are wearing now." : loadoutMessage;
+            const auto text=loadoutMessage.empty() ? (set.hotbarSaved ? "Gear and hotbar skills are saved. Save gear + skills replaces both with your current setup." : "This older loadout keeps your current skills. Save gear + skills adds your current hotbar.") : loadoutMessage;
             draw->PushClipRect(At(origin,scale,padding,466),At(origin,scale,width-padding,height-24));
             BodyText(draw,text.c_str(),At(origin,scale,padding+2,466),{scale.x*.9f,scale.y*.9f},BodyColor,(contentWidth-4)*scale.x); draw->PopClipRect();
         }
     }
     Ui::End();
 }
-static void OpenLoadoutSettings() {}
+static void OpenLoadoutSettings() { OpenBankSettings(); }
 static void DrawLoadoutSettings(UiPoint origin,UiPoint scale) {
     auto* draw=Ui::GetWindowDrawList();
-    Heading(draw,"Loadouts",At(origin,scale,24,20),scale,302);
-    BodyText(draw,"Press + beside Inventory to save your current gear. Open Loadouts to equip a saved set. Use ... to rename, replace or delete it.\n\nGear can come from Inventory or accessible pages of an open bank. Missing items stop the change before it starts.",At(origin,scale,24,64),scale,BodyColor,302*scale.x);
-    if (DrawSkinControl("Back",At(origin,scale,104,232),scale)) activeAddon=nullptr;
+    Heading(draw,"Loadouts & Sorting",At(origin,scale,24,20),scale,302);
+    if (OptionRow("Sorting:",draftBankEnabled ? "On" : "Off",At(origin,scale,10,58),scale,"Shows sorting buttons in Inventory and Bank.",At(origin,scale,355,58),origin.x)) draftBankEnabled=!draftBankEnabled;
+    BodyText(draw,"+ saves gear and hotbar skills. Loadouts restores both from Inventory or an open bank; older saves keep your current skills.\n\nSort Inventory uses the same item groups as Bank. Sort Page sorts the current page. Sort Pages lets you choose pages before sorting.",At(origin,scale,24,106),scale,BodyColor,302*scale.x);
+    if (!bankMessage.empty()) BodyText(draw,bankMessage.c_str(),At(origin,scale,24,244),scale,GoldColor,302*scale.x);
+    if (DrawSkinControl("Okay",At(origin,scale,24,280),scale)) { if (SaveBankSettings()) { bankEnabled=draftBankEnabled; activeAddon=nullptr; } else bankMessage="Settings could not be saved."; }
+    if (DrawSkinControl("Back",At(origin,scale,185,280),scale)) activeAddon=nullptr;
 }
 extern "C" bool __cdecl MeterOverlayLoadouts(const LoadoutFrame* value,LoadoutCommand* command,bool* focused) {
     Lock lock;

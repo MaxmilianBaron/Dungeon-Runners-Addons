@@ -2,6 +2,7 @@
 #include "native_reader.h"
 #include "native_chat.h"
 #include "loadouts.h"
+#include "native_loadout_hotbar.h"
 
 class NativeLoadouts {
     struct Snapshot {
@@ -9,17 +10,19 @@ class NativeLoadouts {
         std::vector<uintptr_t> objects, inventories;
         uintptr_t held=0;
         LoadoutSnapshot state;
+        NativeLoadoutHotbar hotbar;
     };
     LoadoutFrame frame;
     Loadout goal;
     LoadoutStep pending;
+    LoadoutBinding pendingSkill;
     std::vector<LoadoutReturn> bankReturns;
     std::vector<LoadoutPosition> previousCopies;
     std::vector<int> bagIds;
     int displacedReturn=-1,storingReturn=-1;
     uintptr_t owner=0;
     uint64_t nextSample=0, sentAt=0;
-    bool cancelled=false, waiting=false, textFault=false, bankRequired=false;
+    bool cancelled=false, waiting=false, waitingSkill=false, textFault=false, bankRequired=false;
     bool bankChanged=false, sortRequested=false;
     std::string reason;
     static std::string Definition(const NativeReader& r,uintptr_t node) {
@@ -219,10 +222,11 @@ class NativeLoadouts {
             auto ref=sample.state.items[i].ref; ref.name=Name(image,sample.objects[i]);
             frame.equipment.slots[sample.state.items[i].at.slot]=std::move(ref);
         }
-        frame.captured=true; frame.message="Current equipment captured.";
+        frame.equipment.hotbarSaved=true; frame.equipment.hotbar=sample.hotbar.bindings;
+        frame.captured=true; frame.message="Current equipment and hotbar captured.";
     }
     void Finish(const std::string& message) {
-        frame.busy=false; waiting=false; pending={}; goal={}; frame.message=message; cancelled=false;
+        frame.busy=false; waiting=waitingSkill=false; pending={}; pendingSkill={}; goal={}; frame.message=message; cancelled=false;
         bankReturns.clear(); previousCopies.clear(); bagIds.clear(); displacedReturn=storingReturn=-1;
     }
     void Request(uintptr_t image,const Snapshot& sample,LoadoutStep step,uintptr_t object,uint64_t now) {
@@ -256,7 +260,7 @@ public:
     const LoadoutFrame& Frame() const { return frame; }
     bool TakeBankSortRequest() { const bool result=sortRequested; sortRequested=false; return result; }
     void Reset() {
-        frame={}; goal={}; pending={}; owner=0; nextSample=sentAt=0; cancelled=waiting=textFault=bankRequired=false; reason.clear();
+        frame={}; goal={}; pending={}; pendingSkill={}; owner=0; nextSample=sentAt=0; cancelled=waiting=waitingSkill=textFault=bankRequired=false; reason.clear();
         bankReturns.clear(); previousCopies.clear(); bagIds.clear(); displacedReturn=storingReturn=-1;
         bankChanged=sortRequested=false;
     }
@@ -266,7 +270,7 @@ public:
         if (frame.busy && (!enabled || !focused || command.kind==LoadoutCommand::Kind::Cancel || bankBusy)) { cancelled=true; reason="Equipment change cancelled."; }
         if (!enabled && !frame.busy) { frame.visible=false; return; }
         if (now<nextSample && !action) return;
-        nextSample=now+(frame.busy ? 33 : 200);
+        nextSample=frame.busy ? now : now+200;
         Snapshot sample;
         if (!Read(r,image,sample,frame.busy || action)) {
             frame.visible=false;
@@ -276,6 +280,10 @@ public:
             } else if (action) frame.message="Open Inventory before using Loadouts.";
             return;
         }
+        if ((frame.busy ? goal.hotbarSaved : command.kind==LoadoutCommand::Kind::Capture || command.set.hotbarSaved) && !sample.hotbar.Read(r,image,sample.unit)) {
+            if (frame.busy) { cancelled=true; reason="Hotbar is unavailable. Waiting for the pending change."; }
+            frame.message="Hotbar could not be read. Open Inventory and try again."; return;
+        }
         if (!frame.busy) {
             if (!action || !frame.visible || !focused || command.owner!=frame.owner) return;
             if (command.kind==LoadoutCommand::Kind::Capture) { Capture(image,sample); return; }
@@ -283,14 +291,17 @@ public:
             if (bankBusy) { frame.message="Wait for bank sorting to finish."; return; }
             auto plan=PlanLoadout(sample.state,command.set);
             if (!plan.error.empty()) { frame.message=plan.error; return; }
-            if (plan.steps.empty()) { frame.message="Already equipped."; return; }
+            const auto hotbar=PlanLoadoutHotbar(command.set,sample.hotbar.bindings,sample.hotbar.skills);
+            const auto skillError=command.set.hotbarSaved ? sample.hotbar.Validate(image,command.set) : std::string{};
+            if (!skillError.empty()) { frame.message=skillError; return; }
+            if (plan.steps.empty() && hotbar.changes.empty()) { frame.message="Already equipped."; return; }
             bankReturns=std::move(plan.bankReturns); displacedReturn=storingReturn=-1; previousCopies.clear(); bagIds.clear();
             bankChanged=sortRequested=false;
             for (const auto& bag:sample.state.bags) bagIds.push_back(bag.id);
             bankRequired=!bankReturns.empty();
             for (const auto& step:plan.steps) if (step.operation==LoadoutOperation::Take && step.item.at.inventory>=0 && sample.state.bags[step.item.at.inventory].bank) bankRequired=true;
-            goal=command.set; owner=sample.unit; frame.completed=0; frame.busy=true; cancelled=waiting=false; pending={}; reason.clear();
-            nextSample=now+33;
+            goal=command.set; owner=sample.unit; frame.completed=0; frame.busy=true; cancelled=waiting=waitingSkill=false; pending={}; pendingSkill={}; reason.clear();
+            nextSample=now;
         }
         if (sample.unit!=owner) { Finish("Equipment change stopped: character changed."); return; }
         if (!frame.visible || (bankRequired && !sample.state.bankOpen)) { cancelled=true; reason="Equipment change cancelled: window closed."; }
@@ -298,6 +309,14 @@ public:
             bool same=sample.state.bags.size()==bagIds.size();
             for (size_t i=0;same && i<bagIds.size();++i) same=sample.state.bags[i].id==bagIds[i];
             if (!same) { cancelled=true; reason="Equipment change cancelled: bank access changed."; }
+        }
+        if (waitingSkill) {
+            const auto current=std::find_if(sample.hotbar.bindings.begin(),sample.hotbar.bindings.end(),[&](const auto& binding) { return binding.slot==pendingSkill.slot; });
+            if (current==sample.hotbar.bindings.end() || current->key!=pendingSkill.key) {
+                if (now-sentAt>=8000) { cancelled=true; reason="The game has not confirmed the skill change. Waiting for it to finish."; frame.message=reason; }
+                return;
+            }
+            waitingSkill=false; pendingSkill={}; ++frame.completed;
         }
         if (waiting) {
             bool acknowledged=false;
@@ -359,7 +378,16 @@ public:
         if (sample.held) { Finish("Put down the item on your cursor before trying again."); return; }
         auto plan=PlanLoadout(sample.state,goal,bankReturns);
         if (!plan.error.empty()) { Finish(plan.error); return; }
-        if (plan.steps.empty()) { sortRequested=bankChanged && sample.state.bankOpen; Finish("Equipped: "+goal.name); return; }
+        if (plan.steps.empty()) {
+            const auto hotbar=PlanLoadoutHotbar(goal,sample.hotbar.bindings,sample.hotbar.skills);
+            if (!hotbar.error.empty()) { Finish(hotbar.error); return; }
+            if (!hotbar.changes.empty()) {
+                pendingSkill=hotbar.changes.front();
+                if (!sample.hotbar.Send(image,pendingSkill)) { Finish("The game could not change this skill slot."); return; }
+                waitingSkill=true; sentAt=now; frame.message="Restoring hotbar..."; return;
+            }
+            sortRequested=bankChanged && sample.state.bankOpen; Finish("Equipped: "+goal.name); return;
+        }
         const auto& step=plan.steps.front();
         uintptr_t object=0;
         for (size_t i=0;i<sample.state.items.size();++i) if (sample.state.items[i].ref.key==step.item.ref.key && sample.state.items[i].at==step.item.at) { object=sample.objects[i]; break; }

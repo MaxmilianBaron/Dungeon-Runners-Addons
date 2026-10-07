@@ -131,11 +131,17 @@ static std::filesystem::path enhancedSettings;
 static std::string enhancedMessage;
 static bool mouseLookEnabled = false, mouseLookAvailable = false;
 static BankSortFrame bankFrame;
+static BankSortFrame inventoryFrame;
 static unsigned bankAction = 0;
+static unsigned inventoryAction=0;
+static bool bankPagePicker=false;
+static std::set<unsigned> bankSelected;
+static std::vector<unsigned> bankAvailable;
 static bool bankEnabled = true, draftBankEnabled = true;
 static std::filesystem::path bankSettings;
 static std::string bankMessage;
 static RECT bankArea{};
+static RECT bankPickerArea{},inventoryArea{};
 static LoadoutStore loadoutStore;
 static LoadoutFrame loadoutFrame;
 static LoadoutCommand loadoutCommand;
@@ -447,8 +453,8 @@ static bool InputAllowed(UiPoint point,bool menuLayer) {
     if (moveEditing) return true;
     const auto display = Ui::GetIO().DisplaySize;
     const POINT pointer{static_cast<LONG>(point.x),static_cast<LONG>(point.y)};
-    if (loadoutInputTest && loadoutFrame.visible && LoadoutContains(pointer) && display.x>0 && display.y>0) return loadoutInputTest(point.x/display.x,point.y/display.y,false);
-    if (bankInputTest && bankFrame.visible && PtInRect(&bankArea,pointer) && display.x > 0 && display.y > 0) return bankInputTest(point.x/display.x,point.y/display.y,false);
+    if (loadoutInputTest && loadoutFrame.visible && (LoadoutContains(pointer) || PtInRect(&inventoryArea,pointer)) && display.x>0 && display.y>0) return loadoutInputTest(point.x/display.x,point.y/display.y,false);
+    if (bankInputTest && bankFrame.visible && (PtInRect(&bankArea,pointer) || PtInRect(&bankPickerArea,pointer)) && display.x > 0 && display.y > 0) return bankInputTest(point.x/display.x,point.y/display.y,false);
     if (!nativeInputTest) return true;
     return display.x > 0 && display.y > 0 && nativeInputTest(point.x / display.x,point.y / display.y,menuLayer);
 }
@@ -489,19 +495,22 @@ static LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wparam
         }
         if (context && !shuttingDown && worldVisible && !consume) {
             Ui::SetCurrentContext(context);
-            if (bankFrame.busy) {
-                if ((message == WM_KEYDOWN || message == WM_KEYUP) && wparam == VK_ESCAPE) { bankAction = 3; consumeEscapeUp = false; nativeBankClose = true; }
+            if (bankFrame.busy || inventoryFrame.busy) {
+                const bool inventory=inventoryFrame.busy;
+                if ((message == WM_KEYDOWN || message == WM_KEYUP) && wparam == VK_ESCAPE) { (inventory ? inventoryAction : bankAction) = 3; consumeEscapeUp = false; nativeBankClose = true; }
                 else if (message == WM_KEYDOWN || message == WM_KEYUP || message == WM_CHAR) consume = true;
                 else if (message >= WM_MOUSEFIRST && message <= WindowsCompat::MouseHorizontalWheel) {
                     POINT point{GET_X_LPARAM(lparam),GET_Y_LPARAM(lparam)};
                     const auto display = Ui::GetIO().DisplaySize;
                     const bool closeMouse = message == WM_MOUSEMOVE || message == WM_LBUTTONDOWN || message == WM_LBUTTONUP;
-                    nativeBankClose = closeMouse && bankInputTest && display.x > 0 && display.y > 0 && bankInputTest(point.x/display.x,point.y/display.y,true);
-                    if (!nativeBankClose) { if (message == WM_MOUSEMOVE || PtInRect(&bankArea,point)) Ui::Message(window,message,wparam,lparam); consume = true; }
+                    const auto navigation=inventory ? loadoutInputTest : bankInputTest;
+                    nativeBankClose = closeMouse && navigation && display.x > 0 && display.y > 0 && navigation(point.x/display.x,point.y/display.y,true);
+                    if (!nativeBankClose) { if (message == WM_MOUSEMOVE || PtInRect(inventory ? &inventoryArea : &bankArea,point)) Ui::Message(window,message,wparam,lparam); consume = true; }
                 }
                 if (nativeBankClose) { Ui::ClearInput(); dragging = false; }
-                if (message == WM_KILLFOCUS) bankAction = 3;
+                if (message == WM_KILLFOCUS) (inventory ? inventoryAction : bankAction) = 3;
             }
+            if (bankPagePicker && message==WM_KEYDOWN && wparam==VK_ESCAPE) { bankPagePicker=false; consumeEscapeUp=true; consume=true; }
         }
         if (context && !shuttingDown && worldVisible && !consume && !nativeBankClose) {
             Ui::SetCurrentContext(context);
@@ -1681,36 +1690,23 @@ static void DrawMoveEditor() {
     Ui::End();
 }
 
-static void DrawBankSettings(UiPoint origin,UiPoint scale) {
-    auto point = [origin,scale](float x,float y) { return At(origin,scale,x,y); };
-    auto* draw = Ui::GetWindowDrawList();
-    Heading(draw,"Sort Bank Pages",point(34,20),scale,280);
-    if (OptionRow("Bank sort:",draftBankEnabled ? "On" : "Off",point(10,58),scale,"Shows sorting buttons while the bank is open.",point(355,58),origin.x)) draftBankEnabled = !draftBankEnabled;
-    BodyText(draw,"Sort Page: current page. Sort Pages: all accessible pages. Groups rings, weapons and matching armor icons.",point(34,106),scale,BodyColor,282 * scale.x);
-    if (!bankMessage.empty()) BodyText(draw,bankMessage.c_str(),point(34,195),scale,GoldColor,282 * scale.x);
-    if (DrawSkinControl("Okay",point(24,232),scale,&okayRect)) {
-        if (SaveBankSettings()) { bankEnabled = draftBankEnabled; activeAddon = nullptr; }
-        else bankMessage = "Settings could not be saved.";
-    }
-    if (DrawSkinControl("Back",point(185,232),scale,&cancelRect)) activeAddon = nullptr;
-}
-
-static void DrawBankSort() {
-    static std::string lastMessage;
-    static uint64_t messageUntil = 0;
-    bankArea = {};
-    if (!addonRegistry.BankSort() || (!bankEnabled && !bankFrame.busy) || !bankFrame.visible || addonsOpen || reportOpen) { lastMessage.clear(); messageUntil = 0; return; }
-    if (lastMessage != bankFrame.message) {
-        lastMessage = bankFrame.message;
-        messageUntil = !lastMessage.empty() && !bankFrame.busy ? WindowsCompat::Milliseconds()+8000 : 0;
+static void DrawStorageSort(const BankSortFrame& frame,unsigned& action,RECT& area,bool inventory) {
+    static std::array<std::string,2> lastMessages;
+    static std::array<uint64_t,2> messageTimes{};
+    auto& lastMessage=lastMessages[inventory ? 1 : 0]; auto& messageUntil=messageTimes[inventory ? 1 : 0];
+    area = {};
+    if (!addonRegistry.Loadouts() || (!bankEnabled && !frame.busy) || !frame.visible || addonsOpen || reportOpen || (inventory && loadoutOpen)) { lastMessage.clear(); messageUntil = 0; return; }
+    if (lastMessage != frame.message) {
+        lastMessage = frame.message;
+        messageUntil = !lastMessage.empty() && !frame.busy ? WindowsCompat::Milliseconds()+8000 : 0;
     }
     const auto scale = GameScale();
-    const float width = bankFrame.width, height = bankFrame.height;
+    const float width = frame.width, height = frame.height;
     const UiPoint size(width*scale.x,height*scale.y);
-    const UiPoint origin(bankFrame.x*scale.x,bankFrame.y*scale.y);
+    const UiPoint origin(frame.x*scale.x,frame.y*scale.y);
     Ui::SetNextWindowPos(origin); Ui::SetNextWindowSize(size);
-    if (Ui::Begin("##BankSort",nullptr,SurfaceFlags | Ui::NoSavedSettings)) {
-        RegisterHitArea(); bankArea = Rectangle(origin,size);
+    if (Ui::Begin(inventory ? "##InventorySort" : "##BankSort",nullptr,SurfaceFlags | Ui::NoSavedSettings)) {
+        RegisterHitArea(); area = Rectangle(origin,size);
         const auto button = [&](const char* id,const char* label,float x,float buttonWidth) {
             const auto position = At(origin,scale,x,0);
             const UiPoint extent(buttonWidth*scale.x,height*scale.y);
@@ -1719,19 +1715,67 @@ static void DrawBankSort() {
             nativeSkin.CompactButton(Ui::GetWindowDrawList(),position,extent,scale,Ui::IsItemHovered(),Ui::IsItemActive(),label);
             return clicked;
         };
-        if (bankFrame.busy) {
-            const auto progress = bankFrame.total ? "Sorting " + std::to_string(bankFrame.completed) + " / " + std::to_string(bankFrame.total) : std::string("Planning...");
+        if (frame.busy) {
+            const auto progress = frame.total ? "Sorting " + std::to_string(frame.completed) + " / " + std::to_string(frame.total) : std::string("Planning...");
             BodyText(Ui::GetWindowDrawList(),progress.c_str(),At(origin,scale,2,3),UiPoint(scale.x*.85f,scale.y*.85f));
-            if (button("CancelSort","Cancel",width-108,108)) bankAction = 3;
+            if (button("CancelSort","Cancel",width-108,108)) action = 3;
         } else {
-            Ui::BeginDisabled(!bankFrame.available || loadoutFrame.busy || loadoutCommand.kind==LoadoutCommand::Kind::Equip);
+            Ui::BeginDisabled(!frame.available || loadoutFrame.busy || (inventory ? bankFrame.busy : inventoryFrame.busy) || loadoutCommand.kind==LoadoutCommand::Kind::Equip);
             const float half = (width-8)*.5f;
-            if (button("SortPage","Sort Page",0,half)) bankAction = 1;
-            if (button("SortPages","Sort Pages",half+8,half)) bankAction = 2;
+            if (inventory) { if (button("SortInventory","Sort Inventory",0,width)) action=1; }
+            else {
+                if (button("SortPage","Sort Page",0,half)) action = 1;
+                if (button("SortPages","Sort Pages",half+8,half)) {
+                    if (bankAvailable!=frame.pages) { bankAvailable=frame.pages; bankSelected={frame.pages.begin(),frame.pages.end()}; }
+                    bankPagePicker=!bankPagePicker;
+                }
+            }
             Ui::EndDisabled();
         }
-        const auto* status = bankFrame.message.empty() ? "Sort Page: current page. Sort Pages: fill from Page 1. Groups by item type and appearance." : bankFrame.message.c_str();
+        const auto* status = frame.message.empty() ? (inventory ? "Sort Inventory: groups items using the same order as Bank." : "Sort Page: current page. Sort Pages: choose which pages to sort.") : frame.message.c_str();
         if (Ui::IsWindowHovered() || WindowsCompat::Milliseconds() < messageUntil) QueueHelp(status,At(origin,scale,width+5,0),scale,origin.x,true);
+    }
+    Ui::End();
+}
+
+static void DrawBankSort() { DrawStorageSort(bankFrame,bankAction,bankArea,false); }
+
+static void DrawBankPagePicker() {
+    bankPickerArea={};
+    if (!bankPagePicker || !bankFrame.visible || bankFrame.busy || !bankEnabled || !addonRegistry.Loadouts() || addonsOpen || reportOpen) return;
+    if (bankAvailable!=bankFrame.pages) { bankPagePicker=false; return; }
+    const auto display=Ui::GetIO().DisplaySize;
+    const unsigned columns=4,rows=static_cast<unsigned>((bankAvailable.size()+columns-1)/columns);
+    const float width=360,height=104+rows*30.0f;
+    const auto scale=FitScale(GameScale(),{width,height});
+    const UiPoint size(width*scale.x,height*scale.y);
+    const auto game=GameScale();
+    const UiPoint origin(std::clamp(bankFrame.x*game.x,0.0f,std::max(0.0f,display.x-size.x)),std::clamp((bankFrame.y+26)*game.y,0.0f,std::max(0.0f,display.y-size.y)));
+    Ui::SetNextWindowPos(origin); Ui::SetNextWindowSize(size);
+    if (Ui::Begin("##BankPageSelection",nullptr,SurfaceFlags|Ui::NoSavedSettings)) {
+        RegisterHitArea(); bankPickerArea=Rectangle(origin,size);
+        nativeSkin.Frame(Ui::GetWindowDrawList(),origin,size,scale);
+        BodyText(Ui::GetWindowDrawList(),"Select bank pages",At(origin,scale,18,12),scale,GoldColor);
+        for (size_t i=0;i<bankAvailable.size();++i) {
+            const auto id=bankAvailable[i];
+            const auto at=At(origin,scale,18+static_cast<float>(i%columns)*82,42+static_cast<float>(i/columns)*30);
+            Ui::SetCursorScreenPos(at); Ui::PushID(static_cast<int>(id));
+            Ui::BeginDisabled(!bankFrame.available || inventoryFrame.busy || loadoutFrame.busy);
+            if (Ui::InvisibleButton("Page",{78*scale.x,26*scale.y})) { if (!bankSelected.erase(id)) bankSelected.insert(id); }
+            const auto label=std::string(bankSelected.count(id) ? "[x] " : "[ ] ")+std::to_string(id>1 ? id-1 : id);
+            nativeSkin.CompactButton(Ui::GetWindowDrawList(),at,{78*scale.x,26*scale.y},scale,Ui::IsItemHovered(),Ui::IsItemActive(),label.c_str());
+            Ui::EndDisabled(); Ui::PopID();
+        }
+        const auto button=[&](const char* id,const char* label,float x) {
+            const auto at=At(origin,scale,x,height-40); const UiPoint extent(100*scale.x,26*scale.y);
+            Ui::SetCursorScreenPos(at); const bool clicked=Ui::InvisibleButton(id,extent);
+            nativeSkin.CompactButton(Ui::GetWindowDrawList(),at,extent,scale,Ui::IsItemHovered(),Ui::IsItemActive(),label); return clicked;
+        };
+        if (button("SelectAll","All",18)) bankSelected={bankAvailable.begin(),bankAvailable.end()};
+        Ui::BeginDisabled(bankSelected.empty() || !bankFrame.available || inventoryFrame.busy || loadoutFrame.busy);
+        if (button("StartSort","Sort selected",130)) { bankAction=2; bankPagePicker=false; }
+        Ui::EndDisabled();
+        if (button("ClosePages","Cancel",242)) bankPagePicker=false;
     }
     Ui::End();
 }
@@ -2159,9 +2203,8 @@ static void DiscoverAddons(const std::filesystem::path& root) {
     if (addonRegistry.MythicSounds()) registeredAddons.push_back({"mythic-drop-sounds","Mythic Drop Sounds","Sound and chat alerts for Mythic drops.",OpenMythicSettings,DrawMythicSettings,nullptr});
     if (addonRegistry.WishingWell()) registeredAddons.push_back({"wishing-well-tracker","Wishing Well Tracker","Cooldown and login reminders with separate sounds.",OpenWellSettings,DrawWellSettings,nullptr});
     if (addonRegistry.CombatCursor()) registeredAddons.push_back({"cursor-circle","Cursor Circle","Highlights the cursor during combat.",OpenCursorSettings,DrawCursorSettings,nullptr});
-    if (addonRegistry.BankSort()) registeredAddons.push_back({"sort-bank-pages","Sort Bank Pages","Sort one bank page or all accessible pages.",OpenBankSettings,DrawBankSettings,nullptr});
     if (addonRegistry.MoveEverything()) registeredAddons.push_back({"moveeverything","Moveeverything","Move player, party, target, chat, minimap and buff/curse panels.",OpenMoveSettings,DrawMoveSettings,nullptr});
-    if (addonRegistry.Loadouts()) registeredAddons.push_back({"loadouts","Loadouts","Save equipment sets next to Inventory.",OpenLoadoutSettings,DrawLoadoutSettings,nullptr});
+    if (addonRegistry.Loadouts()) registeredAddons.push_back({"loadouts","Loadouts & Sorting","Gear and hotbar loadouts, Inventory and selected bank page sorting.",OpenLoadoutSettings,DrawLoadoutSettings,nullptr});
     if (addonRegistry.ControllerEnabled()) registeredAddons.push_back({"controller","Controller","Gamepad movement, combat, consumables and menus.",OpenControllerSettings,DrawControllerSettings,nullptr});
     if (addonRegistry.Enhanced()) registeredAddons.push_back({"enhanced-settings","Enhanced Settings","Mouse look, left-click attacks and low HP warning.",OpenEnhancedSettings,DrawEnhancedSettings,nullptr});
     for (const auto& extension:addonRegistry.Extensions()) registeredAddons.push_back({extension.id,extension.name,extension.description,OpenExtensionSettings,DrawExtensionSettings,&extension,addonRegistry.Settings(extension)});
@@ -2244,7 +2287,7 @@ static void DrawAddons() {
     }
     if (addonsOpen) {
         const float listHeight = std::clamp(static_cast<float>(registeredAddons.size())*48,48.0f,192.0f);
-        const float height = activeAddon ? (activeAddon->advanced || activeAddon->open == OpenControllerSettings ? 506.0f : activeAddon->open == OpenWellSettings ? 518.0f : activeAddon->open == OpenEnhancedSettings ? 457.0f : activeAddon->open == OpenDamageSettings ? 390.0f : activeAddon->open == OpenNameplateSettings && !nameplatePage ? 340.0f : activeAddon->open == OpenMythicSettings ? 365.0f : activeAddon->open == OpenCursorSettings ? 347.0f : 289.0f) : 125+listHeight;
+        const float height = activeAddon ? (activeAddon->advanced || activeAddon->open == OpenControllerSettings ? 506.0f : activeAddon->open == OpenWellSettings ? 518.0f : activeAddon->open == OpenEnhancedSettings ? 457.0f : activeAddon->open == OpenDamageSettings ? 390.0f : activeAddon->open == OpenNameplateSettings && !nameplatePage ? 340.0f : activeAddon->open == OpenMythicSettings ? 365.0f : activeAddon->open == OpenLoadoutSettings ? 342.0f : activeAddon->open == OpenCursorSettings ? 347.0f : 289.0f) : 125+listHeight;
         const bool controllerPanel=activeAddon && activeAddon->open==OpenControllerSettings;
         const auto preferred=controllerPanel ? UiPoint(std::max(buttonScale.x,1.5f),std::max(buttonScale.y,1.5f)) : buttonScale;
         const UiPoint scale = FitScale(preferred,UiPoint(350,height));
@@ -2290,7 +2333,7 @@ extern "C" __declspec(dllexport) int __cdecl MeterOverlayStart(const char* iniFi
     cursorOptions = {}; cursorCombatUntil = 0;
     { std::ifstream input(cursorSettings); cursorOptions.Load(input); }
     bankSettings = addonsDirectory / L"SortBankPages" / L"settings.ini";
-    bankEnabled = true; bankFrame = {}; bankAction = 0; bankArea = {};
+    bankEnabled = true; bankFrame = {}; bankAction = 0; bankArea = {}; bankPickerArea={}; bankPagePicker=false; bankSelected.clear(); bankAvailable.clear(); inventoryFrame={}; inventoryAction=0; inventoryArea={};
     { unsigned value = 1; std::ifstream input(bankSettings); if (input >> value && value <= 1) bankEnabled = value != 0; }
     moveSettings = addonsDirectory / L"Moveeverything" / L"settings.ini";
     moveOptions = {}; moveFrame = {}; moveEditing = false; moveSelected = -1;
@@ -2471,9 +2514,9 @@ extern "C" void __cdecl MeterOverlayLayer(IDirect3DDevice9* device,AddonUiLayer 
         DrawHelp();
     } else if (layer == AddonUiLayer::Menu) { help.text.clear(); DrawAddons(); DrawLeaderboard(); DrawHelp(); }
     else if (layer == AddonUiLayer::CharacterSheet) DrawCharacterSheet();
-    else if (layer == AddonUiLayer::Bank) { help.text.clear(); DrawBankSort(); DrawHelp(); }
+    else if (layer == AddonUiLayer::Bank) { help.text.clear(); DrawBankSort(); DrawBankPagePicker(); DrawHelp(); }
     else if (layer == AddonUiLayer::Inventory) {
-        if (loadoutFrame.visible && addonRegistry.Loadouts()) { help.text.clear(); DrawLoadouts(); DrawHelp(); }
+        if (loadoutFrame.visible && addonRegistry.Loadouts()) { help.text.clear(); DrawLoadouts(); DrawStorageSort(inventoryFrame,inventoryAction,inventoryArea,true); DrawHelp(); }
         else loadoutArea=loadoutListButton=loadoutAddButton=loadoutNameArea={};
     }
     else DrawCooldowns(now,layer);
@@ -2536,12 +2579,20 @@ extern "C" bool __cdecl MeterOverlayController(Controller::Settings* settings,co
 }
 extern "C" void __cdecl MeterOverlayCursorCombat(uint64_t until) { Lock lock; cursorCombatUntil = until; }
 
-extern "C" bool __cdecl MeterOverlayBankSettings(const BankSortFrame* value,unsigned* action,bool* focused) {
+extern "C" bool __cdecl MeterOverlayBankSettings(const BankSortFrame* value,BankSortCommand* action,bool* focused) {
     Lock lock;
-    if (value) bankFrame = *value;
-    if (action) { *action = bankAction; bankAction = 0; }
+    if (value) { bankFrame = *value; if (!value->visible) { bankPagePicker=false; bankPickerArea={}; } }
+    if (action) { action->action=bankAction; action->pages.assign(bankSelected.begin(),bankSelected.end()); bankAction = 0; }
     if (focused) *focused = gameWindow && GetForegroundWindow() == gameWindow && !addonsOpen && !reportOpen;
     return addonRegistry.BankSort() && bankEnabled;
+}
+
+extern "C" bool __cdecl MeterOverlayInventorySort(const BankSortFrame* value,unsigned* action,bool* focused) {
+    Lock lock;
+    if (value) inventoryFrame=*value;
+    if (action) { *action=inventoryAction; inventoryAction=0; }
+    if (focused) *focused=gameWindow && GetForegroundWindow()==gameWindow && !addonsOpen && !reportOpen;
+    return addonRegistry.Loadouts() && bankEnabled;
 }
 
 extern "C" bool __cdecl MeterOverlayMoveSettings(MoveLayoutSettings* settings,const MoveLayoutFrame* value) {

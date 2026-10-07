@@ -90,9 +90,9 @@ public:
             if (builtin=="MythicDropSounds" && id=="mythic-drop-sounds") { mythicSounds=true; continue; }
             if (builtin=="WishingWellTracker" && id=="wishing-well-tracker") { wishingWell=true; continue; }
             if (builtin=="CursorCircle" && id=="cursor-circle") { combatCursor=true; continue; }
-            if (builtin=="SortBankPages" && id=="sort-bank-pages") { bankSort=true; continue; }
+            if (builtin=="SortBankPages" && id=="sort-bank-pages") { bankSort=loadouts=true; continue; }
             if (builtin=="Moveeverything" && id=="moveeverything") { moveEverything=true; continue; }
-            if (builtin=="Loadouts" && id=="loadouts") { loadouts=true; continue; }
+            if (builtin=="Loadouts" && id=="loadouts") { loadouts=bankSort=true; continue; }
             if (builtin=="Leaderboard" && id=="leaderboard") { leaderboard=true; continue; }
             if (builtin=="Controller" && id=="controller") { controller=true; continue; }
             if (builtin=="LowHPWarning" && id=="low-hp-warning") { lowHp=true; continue; }

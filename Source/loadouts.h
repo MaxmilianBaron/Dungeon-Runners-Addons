@@ -28,9 +28,20 @@ struct LoadoutRef {
             (type==LoadoutSlots[slot].type || (slot==1 && type==10 && !twoHanded));
     }
 };
+struct LoadoutBinding {
+    unsigned slot=0;
+    std::string key, name;
+    bool operator==(const LoadoutBinding& b) const { return slot==b.slot && key==b.key; }
+};
+struct LoadoutSkill {
+    std::string key, name;
+    unsigned slot=0, rank=0;
+};
 struct Loadout {
     std::string name;
     std::array<LoadoutRef,10> slots{};
+    bool hotbarSaved=false;
+    std::vector<LoadoutBinding> hotbar;
     bool Valid() const {
         if (name.empty() || name.size()>80 || name.find_first_of("\r\n\t")!=std::string::npos) return false;
         bool any=false;
@@ -40,16 +51,46 @@ struct Loadout {
             if (!ref.Fits(i) || ref.key.size()>8192 || ref.name.empty() || ref.name.size()>256) return false;
             any=true;
         }
+        if ((!hotbarSaved && !hotbar.empty()) || hotbar.size()>32) return false;
+        std::set<unsigned> bindings;
+        std::set<std::string> skills;
+        for (const auto& binding:hotbar) {
+            if (!binding.slot || binding.slot>255 || !bindings.insert(binding.slot).second || binding.key.size()>256 || binding.name.size()>256 ||
+                binding.key.find_first_of("\r\n\t")!=std::string::npos || binding.name.find_first_of("\r\n\t")!=std::string::npos ||
+                (binding.key.empty() ? !binding.name.empty() : binding.name.empty() || !skills.insert(binding.key).second)) return false;
+        }
         return any && !(slots[0].twoHanded && !slots[1].key.empty());
     }
 };
+struct LoadoutHotbarPlan {
+    std::vector<LoadoutBinding> changes;
+    std::string error;
+};
+inline LoadoutHotbarPlan PlanLoadoutHotbar(const Loadout& goal,const std::vector<LoadoutBinding>& current,const std::vector<LoadoutSkill>& learned) {
+    LoadoutHotbarPlan plan;
+    if (!goal.Valid()) { plan.error="Saved loadout is invalid."; return plan; }
+    if (!goal.hotbarSaved) return plan;
+    for (const auto& wanted:goal.hotbar) {
+        const auto position=std::find_if(current.begin(),current.end(),[&](const auto& value) { return value.slot==wanted.slot; });
+        if (position==current.end()) { plan.error="A saved hotbar slot is unavailable."; break; }
+        if (!wanted.key.empty()) {
+            const auto matches=std::count_if(learned.begin(),learned.end(),[&](const auto& value) { return value.key==wanted.key && value.rank; });
+            if (matches!=1) { plan.error="Missing learned skill: "+wanted.name; break; }
+        }
+        if (position->key!=wanted.key) plan.changes.push_back(wanted);
+    }
+    if (!plan.error.empty()) plan.changes.clear();
+    return plan;
+}
 inline bool WriteLoadouts(std::ostream& out,const std::string& owner,const std::vector<Loadout>& sets) {
     if (owner.empty() || owner.size()>256 || sets.size()>12) return false;
     for (const auto& set:sets) if (!set.Valid()) return false;
-    out<<"Loadouts 1 "<<std::quoted(owner)<<' '<<sets.size()<<'\n';
+    out<<"Loadouts 2 "<<std::quoted(owner)<<' '<<sets.size()<<'\n';
     for (const auto& set:sets) {
         out<<std::quoted(set.name)<<'\n';
         for (const auto& ref:set.slots) out<<ref.type<<' '<<ref.twoHanded<<' '<<std::quoted(ref.name)<<' '<<std::quoted(ref.key)<<'\n';
+        out<<set.hotbarSaved<<' '<<set.hotbar.size()<<'\n';
+        for (const auto& binding:set.hotbar) out<<binding.slot<<' '<<std::quoted(binding.name)<<' '<<std::quoted(binding.key)<<'\n';
     }
     return out.good();
 }
@@ -64,7 +105,7 @@ inline bool ReadLoadouts(std::istream& in,const std::string& owner,std::vector<L
     std::istringstream input(bytes);
     std::string header, savedOwner;
     unsigned version=0,count=0;
-    if (!(input>>header>>version>>std::quoted(savedOwner)>>count) || header!="Loadouts" || version!=1 || savedOwner!=owner || count>12) return false;
+    if (!(input>>header>>version>>std::quoted(savedOwner)>>count) || header!="Loadouts" || (version!=1 && version!=2) || savedOwner!=owner || count>12) return false;
     std::vector<Loadout> loaded(count);
     for (auto& set:loaded) {
         if (!(input>>std::quoted(set.name))) return false;
@@ -73,6 +114,13 @@ inline bool ReadLoadouts(std::istream& in,const std::string& owner,std::vector<L
             if (!(input>>ref.type>>two>>std::quoted(ref.name)>>std::quoted(ref.key)) || two>1) return false;
             ref.twoHanded=two!=0;
             if (ref.key.empty() && (ref.type || two || !ref.name.empty())) return false;
+        }
+        if (version==2) {
+            unsigned saved=0,bindings=0;
+            if (!(input>>saved>>bindings) || saved>1 || bindings>32) return false;
+            set.hotbarSaved=saved!=0;
+            set.hotbar.resize(bindings);
+            for (auto& binding:set.hotbar) if (!(input>>binding.slot>>std::quoted(binding.name)>>std::quoted(binding.key))) return false;
         }
         if (!set.Valid()) return false;
     }
@@ -133,7 +181,9 @@ struct LoadoutSnapshot {
     bool Valid() const {
         if (bags.empty() || bags.size()>16 || items.size()>2048) return false;
         std::set<int> ids,slots;
+        std::vector<std::vector<bool>> occupied;
         for (const auto& bag:bags) if (bag.width<1 || bag.height<1 || bag.width>32 || bag.height>32 || !ids.insert(bag.id).second) return false;
+        for (const auto& bag:bags) occupied.emplace_back(static_cast<size_t>(bag.width*bag.height),false);
         for (size_t i=0;i<items.size();++i) {
             const auto& item=items[i];
             if (item.width<1 || item.height<1 || item.width>32 || item.height>32 || item.ref.key.empty()) return false;
@@ -143,10 +193,11 @@ struct LoadoutSnapshot {
                 if (item.at.inventory<0 || item.at.inventory>=static_cast<int>(bags.size())) return false;
                 const auto& bag=bags[item.at.inventory];
                 if (item.at.x<0 || item.at.y<0 || item.at.x+item.width>bag.width || item.at.y+item.height>bag.height || (bag.bank && !bankOpen)) return false;
-                for (size_t j=0;j<i;++j) {
-                    const auto& other=items[j];
-                    if (other.at.inventory==item.at.inventory && other.at.slot<0 && item.at.x<other.at.x+other.width && other.at.x<item.at.x+item.width &&
-                        item.at.y<other.at.y+other.height && other.at.y<item.at.y+item.height) return false;
+                auto& cells=occupied[item.at.inventory];
+                for (int y=item.at.y;y<item.at.y+item.height;++y) for (int x=item.at.x;x<item.at.x+item.width;++x) {
+                    const auto cell=static_cast<size_t>(y*bag.width+x);
+                    if (cells[cell]) return false;
+                    cells[cell]=true;
                 }
             }
         }

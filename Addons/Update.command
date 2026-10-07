@@ -388,6 +388,16 @@ function install(game, packageRoot, manifest, checkRunning) {
     var ordered = files.filter(function(f) { return f.path !== 'd3d9.dll'; }).concat(Object.keys(localFiles).map(function(path) {
         return {path: path, sha256: hash(localFiles[path])};
     })).concat(files.filter(function(f) { return f.path === 'd3d9.dll'; }));
+    var selectionPath = safePath(game, 'Addons/Runtime/selection.json');
+    if (info(selectionPath)) {
+        var selected = json(selectionPath, 8192), seen = {};
+        requireValue(selected.schema === 1 && Array.isArray(selected.definitions) && selected.definitions.length <= 64, 'Invalid addon selection.');
+        selected.definitions.forEach(function(path) {
+            requireValue(typeof path === 'string' && /^Addons\/[A-Za-z0-9_-]+\/addon\.ini$/.test(path) && !seen[path], 'Invalid addon selection.');
+            seen[path] = true;
+        });
+        ordered = ordered.filter(function(f) { return !f.path.endsWith('/addon.ini') || !!seen[f.path]; });
+    }
     ordered = ordered.filter(function(f) { return !f.path.endsWith('/addon.ini') || !regular(safePath(game, f.path)); });
     var pending = ordered.filter(function(file) { var path = safePath(game, file.path); return !regular(path) || fileHash(path) !== file.sha256; });
     if (!pending.length) { chmod(safePath(game, 'Addons/Update.command'), true); return 0; }

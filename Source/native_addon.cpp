@@ -70,7 +70,8 @@ extern "C" bool __cdecl MeterOverlayMouseLookInstalled();
 extern "C" void __cdecl MeterOverlayMouseLookAvailable(bool);
 extern "C" bool __cdecl MeterOverlayMouseLook(HWND*,bool*);
 extern "C" void __cdecl MeterOverlayCursorCombat(uint64_t);
-extern "C" bool __cdecl MeterOverlayBankSettings(const BankSortFrame*,unsigned*,bool*);
+extern "C" bool __cdecl MeterOverlayBankSettings(const BankSortFrame*,BankSortCommand*,bool*);
+extern "C" bool __cdecl MeterOverlayInventorySort(const BankSortFrame*,unsigned*,bool*);
 extern "C" bool __cdecl MeterOverlayMoveSettings(MoveLayoutSettings*,const MoveLayoutFrame*);
 extern "C" void __cdecl MeterOverlayBankInputTest(AddonInputTest);
 extern "C" bool __cdecl MeterOverlayLoadouts(const LoadoutFrame*,LoadoutCommand*,bool*);
@@ -84,6 +85,7 @@ static std::recursive_mutex stateGate;
 static NativeMeter meter;
 static CursorCombat cursorCombat;
 static NativeBankSort bankSort;
+static NativeBankSort inventorySort(true);
 static NativeLoadouts loadouts;
 static NativeController controller;
 extern "C" void __cdecl MeterControllerRelease() { controller.Release(); }
@@ -163,6 +165,7 @@ static void Fault(const char* text) {
     cursorCombat.Reset();
     MeterOverlayCursorCombat(0);
     bankSort.Reset();
+    inventorySort.Reset();
     loadouts.Reset();
     history.Pause(true);
     InterlockedExchange(&collecting, 0);
@@ -580,18 +583,24 @@ static void RefreshUi(const NativeReader& reader) {
     const unsigned actions = MeterOverlayStatus();
     const bool enabled = MeterOverlayEnabled();
     const bool cursorEnabled = MeterOverlayCursorEnabled();
-    unsigned bankAction = 0;
+    BankSortCommand bankAction;
     bool bankFocused = false;
     const bool bankEnabled = MeterOverlayBankSettings(nullptr,&bankAction,&bankFocused);
-    if (loadouts.Frame().busy && bankAction!=3) bankAction=0;
-    bankSort.Service(reader,image,bankEnabled,bankAction,bankFocused,now);
+    if ((loadouts.Frame().busy || inventorySort.Frame().busy) && bankAction.action!=3) bankAction.action=0;
+    bankSort.Service(reader,image,bankEnabled,bankAction.action,bankFocused,now,bankAction.pages);
     MeterOverlayBankSettings(&bankSort.Frame(),nullptr,nullptr);
+    unsigned inventoryAction=0;
+    bool inventoryFocused=false;
+    const bool inventoryEnabled=MeterOverlayInventorySort(nullptr,&inventoryAction,&inventoryFocused);
+    if ((loadouts.Frame().busy || bankSort.Frame().busy) && inventoryAction!=3) inventoryAction=0;
+    inventorySort.Service(reader,image,inventoryEnabled,inventoryAction,inventoryFocused,now);
+    MeterOverlayInventorySort(&inventorySort.Frame(),nullptr,nullptr);
     LoadoutCommand loadoutAction;
     bool loadoutFocused=false;
     const bool loadoutEnabled=MeterOverlayLoadouts(nullptr,&loadoutAction,&loadoutFocused);
-    loadouts.Service(reader,image,loadoutEnabled,loadoutAction,loadoutFocused,bankSort.Frame().busy,now);
-    if (loadouts.TakeBankSortRequest() && bankEnabled && bankFocused && loadoutFocused) {
-        bankSort.Service(reader,image,true,2,true,now);
+    loadouts.Service(reader,image,loadoutEnabled,loadoutAction,loadoutFocused,bankSort.Frame().busy || inventorySort.Frame().busy,now);
+    if (loadouts.TakeBankSortRequest() && bankEnabled && bankFocused && loadoutFocused && !inventorySort.Frame().busy && !bankAction.pages.empty()) {
+        bankSort.Service(reader,image,true,2,true,now,bankAction.pages);
         MeterOverlayBankSettings(&bankSort.Frame(),nullptr,nullptr);
     }
     MeterOverlayLoadouts(&loadouts.Frame(),nullptr,nullptr);
@@ -760,6 +769,7 @@ static void Observe(unsigned kind, const HookRegisters& registers) {
         cursorCombat.Reset();
         MeterOverlayCursorCombat(0);
         bankSort.Reset();
+        inventorySort.Reset();
         loadouts.Reset();
         meter.Zone();
         history.LeaveZone();

@@ -536,6 +536,15 @@ def install(game, package, manifest, check_running=game_stopped):
         require(not target.exists() or target.is_file(), 'A local addon data target is a directory.')
     ordered = [f for f in files if f['path'] != 'd3d9.dll'] + [
         {'path': path, 'sha256': digest(data)} for path, data in local_files.items()] + [f for f in files if f['path'] == 'd3d9.dll']
+    selection_path = child(game, 'Addons/Runtime/selection.json')
+    if selection_path.exists():
+        require(selection_path.is_file() and selection_path.stat().st_size <= 8192, 'Invalid addon selection.')
+        selected = read_json(selection_path)
+        definitions = selected.get('definitions')
+        require(selected.get('schema') == 1 and isinstance(definitions, list) and len(definitions) <= 64 and
+                all(isinstance(p, str) and re.fullmatch(r'Addons/[A-Za-z0-9_-]+/addon\.ini', p) for p in definitions) and
+                len(set(definitions)) == len(definitions), 'Invalid addon selection.')
+        ordered = [f for f in ordered if not f['path'].endswith('/addon.ini') or f['path'] in definitions]
     ordered = [f for f in ordered if not (f['path'].endswith('/addon.ini') and child(game, f['path']).is_file())]
     if all(child(game, f['path']).is_file() and
             file_hash(child(game, f['path'])) == f['sha256'] for f in ordered):

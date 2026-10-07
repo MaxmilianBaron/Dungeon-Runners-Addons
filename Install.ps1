@@ -261,6 +261,20 @@ function Remove-OldAddonBackups([string]$Game) {
     } catch { }
 }
 
+function Get-AddonSelection([string]$Game) {
+    $path = Get-ChildPath $Game 'Addons/Runtime/selection.json'
+    if (-not (Test-Path -LiteralPath $path)) { return $null }
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw 'Invalid addon selection.' }
+    if ((Get-Item -LiteralPath $path).Length -gt 8192) { throw 'Invalid addon selection.' }
+    $selected = [IO.File]::ReadAllText($path) | ConvertFrom-Json
+    if ($selected.schema -ne 1 -or $selected.definitions -isnot [array] -or $selected.definitions.Count -gt 64) { throw 'Invalid addon selection.' }
+    $paths = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($name in $selected.definitions) {
+        if ($name -isnot [string] -or $name -cnotmatch '^Addons/[A-Za-z0-9_-]+/addon\.ini$' -or -not $paths.Add($name)) { throw 'Invalid addon selection.' }
+    }
+    return ,$paths
+}
+
 function Install-Addons([string]$Game,[string]$Package) {
     $Game = [IO.Path]::GetFullPath($Game)
     $Package = [IO.Path]::GetFullPath($Package)
@@ -317,6 +331,8 @@ function Install-Addons([string]$Game,[string]$Package) {
     $backupRoot = Get-ChildPath $Game ('Addons\Backups\'+$identity)
     $pendingRoot = Get-ChildPath $Game ('Addons\Runtime\.install-'+$identity)
     $files = @($manifest.files | Where-Object path -ne 'd3d9.dll') + @($localFiles.Keys | ForEach-Object { [pscustomobject]@{path=$_; sha256=(Get-BytesHash $localFiles[$_])} }) + @($manifest.files | Where-Object path -eq 'd3d9.dll')
+    $selection = Get-AddonSelection $Game
+    if ($null -ne $selection) { $files = @($files | Where-Object { -not $_.path.EndsWith('/addon.ini') -or $selection.Contains($_.path) }) }
     $files = @($files | Where-Object { -not ($_.path.EndsWith('/addon.ini') -and (Test-Path -LiteralPath (Get-ChildPath $Game $_.path) -PathType Leaf)) })
     $needed = @($files | Where-Object {
         $destination = Get-ChildPath $Game $_.path

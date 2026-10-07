@@ -89,6 +89,21 @@
       ]
     },
     {
+      "offset": 1311456,
+      "length": 51,
+      "sha256": ["6f3c7cfea213223330215bcc70bd3b1407db3ad5715d19d3cbe1a025c4ee821d"]
+    },
+    {
+      "offset": 1311520,
+      "length": 297,
+      "sha256": ["3295bfced491d7aef211eade25fce91200d290e5f99feae9ab6c5ebe8a8ccfbd"]
+    },
+    {
+      "offset": 1311824,
+      "length": 224,
+      "sha256": ["ea996327acdea32956827649a3f90c38f4ab21e4f48c9cb3593b7ac22594d154"]
+    },
+    {
       "offset": 1523760,
       "length": 112,
       "sha256": [

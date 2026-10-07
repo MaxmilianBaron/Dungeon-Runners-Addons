@@ -7,6 +7,7 @@
 #include <string>
 #include <tuple>
 #include <unordered_set>
+#include <unordered_map>
 #include <vector>
 #include "bank_catalog.generated.h"
 
@@ -776,6 +777,39 @@ inline BankPlan PlanBankSort(const BankLayout& source,int currentPage,bool allPa
     return plan;
 }
 
+inline BankPlan PlanSelectedBankSort(const BankLayout& source,const std::vector<unsigned>& pageIds) {
+    BankPlan failed;
+    BankGrid grid;
+    if (source.active || !grid.Build(source)) { failed.error="Put down the item on your cursor first, then try again."; return failed; }
+    std::set<unsigned> selected(pageIds.begin(),pageIds.end());
+    if (selected.empty() || selected.size()!=pageIds.size()) { failed.error="Select at least one available page."; return failed; }
+    BankLayout local;
+    std::vector<int> pages,items;
+    for (size_t i=0;i<source.pages.size();++i) if (selected.erase(source.pages[i].id)) { pages.push_back(static_cast<int>(i)); local.pages.push_back(source.pages[i]); }
+    if (!selected.empty()) { failed.error="A selected page is unavailable."; return failed; }
+    for (size_t i=0;i<source.items.size();++i) {
+        const auto found=std::find(pages.begin(),pages.end(),source.items[i].position.page);
+        if (found==pages.end()) continue;
+        items.push_back(static_cast<int>(i)); local.items.push_back(source.items[i]);
+        local.items.back().position.page=static_cast<int>(found-pages.begin());
+    }
+    auto plan=PlanBankSort(local,0,local.pages.size()>1);
+    if (!plan.error.empty()) return plan;
+    for (auto& step:plan.steps) if (step.destination.page>=0) step.destination.page=pages[step.destination.page];
+    auto result=source;
+    for (size_t i=0;i<items.size();++i) {
+        result.items[items[i]].position=plan.result.items[i].position;
+        result.items[items[i]].position.page=pages[plan.result.items[i].position.page];
+    }
+    plan.result=std::move(result);
+    return plan;
+}
+
+struct BankSortCommand {
+    unsigned action=0;
+    std::vector<unsigned> pages;
+};
+
 class BankSortSession {
     BankLayout current, expected;
     std::vector<BankStep> steps;
@@ -783,6 +817,7 @@ class BankSortSession {
     uint64_t sentAt = 0, nextSend = 0;
     bool busy = false, pending = false, cancel = false, recovering = false, sendFailed = false;
     BankPosition returnPosition;
+    std::set<int> recoveryPages;
     std::string message;
     bool Recover(const BankLayout& observed,uint64_t now) {
         if (recovering || !(observed == current) || !current.active) return false;
@@ -792,10 +827,12 @@ class BankSortSession {
         auto destination = returnPosition;
         if (!grid.Fits(current.items[item],destination)) {
             destination = {};
-            for (size_t p = 0; destination.page < 0 && p < current.pages.size(); ++p)
+            for (size_t p = 0; destination.page < 0 && p < current.pages.size(); ++p) {
+                if (!recoveryPages.count(static_cast<int>(p))) continue;
                 for (int y = 0; destination.page < 0 && y < current.pages[p].height; ++y)
                     for (int x = 0; destination.page < 0 && x < current.pages[p].width; ++x)
                         if (grid.Fits(current.items[item],{static_cast<int>(p),x,y})) destination = {static_cast<int>(p),x,y};
+            }
         }
         if (destination.page < 0) return false;
         steps.resize(index+1); steps[index] = {current.active,false,destination};
@@ -809,13 +846,18 @@ class BankSortSession {
         if (!grid.Build(observed)) return false;
         std::vector<int> matched(expected.items.size(),-1);
         std::vector<bool> used(observed.items.size(),false);
+        std::unordered_map<uint32_t,int> observedIndex,expectedIndex;
+        observedIndex.reserve(observed.items.size()); expectedIndex.reserve(expected.items.size());
+        for (size_t i=0;i<observed.items.size();++i) observedIndex.emplace(observed.items[i].id,static_cast<int>(i));
+        for (size_t i=0;i<expected.items.size();++i) expectedIndex.emplace(expected.items[i].id,static_cast<int>(i));
+        const auto observedItem=[&](uint32_t id) { const auto entry=observedIndex.find(id); return entry==observedIndex.end() ? -1 : entry->second; };
         complete = true;
         for (size_t i = 0; i < expected.items.size(); ++i) {
             const auto& before = current.items[i];
             const auto& after = expected.items[i];
             int found = -1;
             if (before == after) {
-                found = observed.Find(before.id);
+                found = observedItem(before.id);
                 if (found < 0 || !(observed.items[found] == before)) return false;
             } else {
                 for (size_t j = 0; j < observed.items.size(); ++j) {
@@ -826,7 +868,7 @@ class BankSortSession {
                 }
                 if (found < 0) {
                     complete = false;
-                    found = observed.Find(before.id);
+                    found = observedItem(before.id);
                     if (found >= 0 && !(observed.items[found] == before)) return false;
                 }
             }
@@ -840,9 +882,9 @@ class BankSortSession {
         const auto active = expected.active ? matched[expected.Find(expected.active)] : -1;
         if (observed.active != (active >= 0 ? observed.items[active].id : 0)) return false;
         for (size_t s = index+1; s < steps.size(); ++s) {
-            const int i = expected.Find(steps[s].item);
-            if (i < 0) return false;
-            steps[s].item = observed.items[matched[i]].id;
+            const auto i = expectedIndex.find(steps[s].item);
+            if (i == expectedIndex.end()) return false;
+            steps[s].item = observed.items[matched[i->second]].id;
         }
         expected = observed;
         return true;
@@ -863,6 +905,12 @@ public:
         message = plan.error;
         if (!message.empty()) return false;
         steps = std::move(plan.steps); index = 0; current = layout;
+        recoveryPages.clear();
+        for (const auto& step:steps) {
+            if (step.destination.page>=0) recoveryPages.insert(step.destination.page);
+            const auto item=current.Find(step.item);
+            if (item>=0 && current.items[item].position.page>=0) recoveryPages.insert(current.items[item].position.page);
+        }
         busy = !steps.empty(); pending = cancel = recovering = sendFailed = false; returnPosition = {}; nextSend = now;
         message = busy ? "Sorting..." : "Already sorted.";
         return true;
@@ -896,5 +944,6 @@ struct BankSortFrame {
     bool visible = false, busy = false, available = false;
     float x = 0, y = 0, width = 0, height = 0;
     unsigned completed = 0, total = 0;
+    std::vector<unsigned> pages;
     std::string message;
 };

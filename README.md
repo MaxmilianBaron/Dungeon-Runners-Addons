@@ -8,6 +8,8 @@
 
 </div>
 
+**[Dungeon Runners Launcher](https://github.com/MaxmilianBaron/Dungeon-Runners-Launcher)** — Game installation and individual addon management.
+
 **Install** — Close the game → extract the installer ZIP → run the file below → select the folder containing `DungeonRunners.exe`.
 
 `Windows`: `Install.cmd` · `Mac`: `Install.command` · `Linux`: `sh Install.sh`
@@ -16,20 +18,19 @@
 
 **Settings** — `ESC` → `Addons`
 
-- **Damage Meter** — Damage Done/Taken, DPS, skill details, crit statistics, history and `/g` reports from combat observed by your client.
+- **Damage Meter** — DPS, damage, skills and combat history.
 - **Hide Gold Labels** — Hides gold labels without affecting pickup.
-- **Cooldown Timers** — Skill, `Buff` and `Curse` timers with a hotbar flash when ready.
-- **Nameplates** — Toggle HP/Mana, names and Posse for yourself and other players, plus Bling Gnome and Flaming Buddy HP bars.
-- **Better Character Sheet** — Shows Weapon Crit, Magic Crit, Stun Resist, Movement and resist chances.
-- **Mythic Drop Sounds** — Sound and chat alerts for your and party Mythic drops, with volume and custom WAV/MP3 support.
-- **Wishing Well Tracker** — Cooldown timer with reminders and custom sounds.
-- **Moveeverything** — Move and resize player, party and target frames, chat and minimap.
-- **Cursor Circle** — Highlights your cursor during combat, with adjustable size and color.
-- **Sort Bank Pages** — Sort one bank page or all unlocked pages by item type, appearance and armor set.
-- **Loadouts** — Save equipped gear and switch sets from Inventory or an open bank.
-- **Leaderboard** — Official Level 100, Gold, Time and PvP rankings via `ESC` → `Leaderboard`.
-- **Controller** — XInput movement, aiming, skills, consumables and menus; editable skill bindings, cursor sensitivity, stick deadzone and trigger threshold. Windows and Wine/Proton; Steam Deck uses the Steam Input Gamepad template.
-- **Enhanced Settings** — Right-button mouse look, left-click attack control and adjustable low-HP warning.
+- **Cooldown Timers** — Skill, buff and curse timers.
+- **Nameplates** — Player and pet health, mana and names.
+- **Better Character Sheet** — Critical, movement and resistance statistics.
+- **Mythic Drop Sounds** — Mythic loot sound and chat alerts.
+- **Wishing Well Tracker** — Well cooldown and reminders.
+- **Moveeverything** — Move and resize interface elements.
+- **Cursor Circle** — Adjustable combat cursor highlight.
+- **Loadouts & Sorting** — Gear and hotbar saves; Inventory and selected bank page sorting.
+- **Leaderboard** — Official Reborn rankings in game.
+- **Controller** — Gamepad movement, combat and menus.
+- **Enhanced Settings** — Camera, attack controls and low-HP warning.
 
 <details>
 <summary>Mac / Linux setup</summary>
