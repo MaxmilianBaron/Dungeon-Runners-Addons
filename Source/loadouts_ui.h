@@ -118,7 +118,9 @@ static bool LoadoutButton(const char* id,const char* label,UiPoint origin,UiPoin
     return clicked;
 }
 static void DrawLoadouts() {
-    loadoutArea=loadoutListButton=loadoutAddButton=loadoutNameArea={};
+    static std::string sortMessage;
+    static uint64_t sortMessageUntil=0;
+    loadoutArea=loadoutListButton=loadoutSortButton=loadoutNameArea=inventoryArea={};
     if (!addonRegistry.Loadouts() || !loadoutFrame.visible || addonsOpen || reportOpen || moveEditing) return;
     if (loadoutStore.Owner()!=loadoutFrame.owner) { CloseLoadouts(); loadoutCapture=-2; loadoutMessage.clear(); loadoutStore.Select(loadoutFrame.owner); }
     AcceptLoadoutResponse();
@@ -126,21 +128,31 @@ static void DrawLoadouts() {
     if (loadoutFrame.titleWidth<160 || loadoutFrame.titleHeight<12 || loadoutFrame.titleHeight>64) return;
     const auto display=Ui::GetIO().DisplaySize;
     const auto gameScale=GameScale();
+    if (sortMessage!=inventoryFrame.message) {
+        sortMessage=inventoryFrame.message;
+        sortMessageUntil=!sortMessage.empty() && !inventoryFrame.busy ? WindowsCompat::Milliseconds()+8000 : 0;
+    }
     const UiPoint title((loadoutFrame.titleX+loadoutFrame.titleWidth*.5f)*gameScale.x,loadoutFrame.titleY*gameScale.y);
     const bool busy=loadoutFrame.busy || bankFrame.busy || inventoryFrame.busy || loadoutCapture!=-2 || loadoutCommand.kind==LoadoutCommand::Kind::Equip;
     for (unsigned i=0;i<2;++i) {
+        if (i && !bankEnabled && !inventoryFrame.busy) continue;
         const UiPoint at(title.x+(i ? 82.0f : -146.0f)*gameScale.x,title.y+(loadoutFrame.titleHeight-22)*.5f*gameScale.y);
-        const UiPoint size((i ? 24.0f : 66.0f)*gameScale.x,22*gameScale.y);
+        const float buttonWidth=i ? 52.0f : 66.0f;
+        const UiPoint size(buttonWidth*gameScale.x,22*gameScale.y);
         if (at.x<0 || at.y<0 || at.x+size.x>display.x || at.y+size.y>display.y) continue;
         Ui::SetNextWindowPos(at); Ui::SetNextWindowSize(size);
-        if (Ui::Begin(i ? "##LoadoutAdd" : "##LoadoutList",nullptr,SurfaceFlags|Ui::NoSavedSettings)) {
-            RegisterHitArea(); (i ? loadoutAddButton : loadoutListButton)=Rectangle(at,size);
-            Ui::BeginDisabled(inventoryFrame.busy || (i && (busy || loadoutRenaming || !loadoutStore.Ready() || loadoutStore.sets.size()>=12)));
-            if (LoadoutButton("button",i ? "+" : "Loadouts",at,gameScale,0,0,i ? 24.0f : 66.0f,22)) {
-                if (i) CaptureLoadout(-1);
+        if (Ui::Begin(i ? "##LoadoutSort" : "##LoadoutList",nullptr,SurfaceFlags|Ui::NoSavedSettings)) {
+            RegisterHitArea(); (i ? loadoutSortButton : loadoutListButton)=Rectangle(at,size);
+            if (i) inventoryArea=loadoutSortButton;
+            Ui::BeginDisabled(i ? !inventoryFrame.busy && (busy || loadoutRenaming || !inventoryFrame.visible || !inventoryFrame.available) : inventoryFrame.busy);
+            if (LoadoutButton("button",i ? (inventoryFrame.busy ? "Cancel" : "Sort") : "Loadouts",at,gameScale,0,0,buttonWidth,22)) {
+                if (i) { inventoryAction=inventoryFrame.busy ? 3 : 1; CloseLoadouts(); }
                 else if (loadoutOpen) CloseLoadouts(); else loadoutOpen=true;
             }
-            if (Ui::IsItemHovered()) QueueHelp(i ? "Save your equipped gear and hotbar skills as a new loadout." : "Equip or manage your saved loadouts.",At(at,gameScale,0,26),gameScale,at.x);
+            if (!loadoutOpen && (Ui::IsItemHovered() || (i && WindowsCompat::Milliseconds()<sortMessageUntil))) {
+                const auto text=i ? (inventoryFrame.busy ? "Cancel inventory sorting." : inventoryFrame.message.empty() ? "Sort Inventory down the left column, then continue to the right." : inventoryFrame.message.c_str()) : "Equip or manage your saved loadouts.";
+                QueueButtonHelp(text,at,size,gameScale);
+            }
             Ui::EndDisabled();
         }
         Ui::End();
@@ -164,7 +176,13 @@ static void DrawLoadouts() {
         auto* draw=Ui::GetWindowDrawList();
         draw->AddRectFilled(At(origin,scale,15,11),At(origin,scale,width-15,height-11),UI_COLOR(0,0,0,210));
         nativeSkin.Frame(draw,origin,size,scale);
-        nativeSkin.AlignedText(draw,"Loadouts",At(origin,scale,padding,18),{(contentWidth-68)*scale.x,24*scale.y},{scale.x*.8f,scale.y*.8f},true);
+        nativeSkin.AlignedText(draw,"Loadouts",At(origin,scale,padding,18),{(contentWidth-106)*scale.x,24*scale.y},{scale.x*.8f,scale.y*.8f},true);
+        if (!loadoutEditor) {
+            Ui::BeginDisabled(busy || loadoutRenaming || !loadoutStore.Ready() || loadoutStore.sets.size()>=12);
+            if (LoadoutButton("add","+",origin,scale,width-padding-94,18,26,24)) CaptureLoadout(-1);
+            if (Ui::IsItemHovered()) QueueButtonHelp("Save your equipped gear and hotbar skills as a new loadout.",At(origin,scale,width-padding-94,18),{26*scale.x,24*scale.y},scale);
+            Ui::EndDisabled();
+        }
         if (LoadoutButton("close","Close",origin,scale,width-padding-60,18,60,24)) {
             CloseLoadouts(); loadoutArea={};
             Ui::End(); return;
@@ -185,7 +203,7 @@ static void DrawLoadouts() {
             Ui::EndDisabled();
             if (loadoutFrame.busy && LoadoutButton("cancel","Cancel",origin,scale,padding,listBottom,contentWidth)) QueueLoadout(LoadoutCommand::Kind::Cancel);
             const auto& status=!loadoutStore.error.empty() ? loadoutStore.error : !loadoutMessage.empty() ? loadoutMessage : loadoutFrame.message;
-            const std::string text=status.empty() ? "Save current gear with + beside Inventory. Select a loadout to equip it; ... opens its details." : status;
+            const std::string text=status.empty() ? "Save gear and hotbar with + in this menu. Select a loadout to equip it; ... opens its details." : status;
             const auto statusAt=At(origin,scale,padding+2,statusY);
             draw->PushClipRect(At(origin,scale,padding,statusY),At(origin,scale,width-padding,height-24));
             BodyText(draw,text.c_str(),statusAt,{scale.x*.9f,scale.y*.9f},BodyColor,(contentWidth-4)*scale.x); draw->PopClipRect();
@@ -254,7 +272,7 @@ static void DrawLoadoutSettings(UiPoint origin,UiPoint scale) {
     auto* draw=Ui::GetWindowDrawList();
     Heading(draw,"Loadouts & Sorting",At(origin,scale,24,20),scale,302);
     if (OptionRow("Sorting:",draftBankEnabled ? "On" : "Off",At(origin,scale,10,58),scale,"Shows sorting buttons in Inventory and Bank.",At(origin,scale,355,58),origin.x)) draftBankEnabled=!draftBankEnabled;
-    BodyText(draw,"+ saves gear and hotbar skills. Loadouts restores both from Inventory or an open bank; older saves keep your current skills.\n\nSort Inventory uses the same item groups as Bank. Sort Page sorts the current page. Sort Pages lets you choose pages before sorting.",At(origin,scale,24,106),scale,BodyColor,302*scale.x);
+    BodyText(draw,"+ in Loadouts saves gear and hotbar skills. Loadouts restores both from Inventory or an open bank; older saves keep your current skills.\n\nSort beside Inventory fills columns from top to bottom. Sort Page sorts the current bank page. Sort Pages lets you choose pages before sorting.",At(origin,scale,24,106),scale,BodyColor,302*scale.x);
     if (!bankMessage.empty()) BodyText(draw,bankMessage.c_str(),At(origin,scale,24,244),scale,GoldColor,302*scale.x);
     if (DrawSkinControl("Okay",At(origin,scale,24,280),scale)) { if (SaveBankSettings()) { bankEnabled=draftBankEnabled; activeAddon=nullptr; } else bankMessage="Settings could not be saved."; }
     if (DrawSkinControl("Back",At(origin,scale,185,280),scale)) activeAddon=nullptr;
@@ -263,7 +281,7 @@ extern "C" bool __cdecl MeterOverlayLoadouts(const LoadoutFrame* value,LoadoutCo
     Lock lock;
     if (value) {
         if (loadoutFrame.owner!=value->owner) { CloseLoadouts(); loadoutCapture=-2; loadoutCommand={}; loadoutResponse=value->response; loadoutMessage.clear(); }
-        if (!value->visible) { CloseLoadouts(); loadoutArea=loadoutListButton=loadoutAddButton=loadoutNameArea={}; }
+        if (!value->visible) { CloseLoadouts(); loadoutArea=loadoutListButton=loadoutSortButton=loadoutNameArea=inventoryArea={}; }
         loadoutFrame=*value;
     }
     if (command) { *command=std::move(loadoutCommand); loadoutCommand={}; }

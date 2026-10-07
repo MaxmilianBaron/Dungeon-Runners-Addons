@@ -15,6 +15,9 @@ struct BankPosition {
     int page = -1, x = 0, y = 0;
     bool operator==(const BankPosition& b) const { return page == b.page && x == b.x && y == b.y; }
 };
+inline bool BankPositionLess(const BankPosition& a,const BankPosition& b) {
+    return std::tie(a.page,a.x,a.y) < std::tie(b.page,b.x,b.y);
+}
 struct BankPage {
     uint32_t id = 0;
     int width = 0, height = 0;
@@ -249,7 +252,7 @@ inline bool BankSortTarget(const BankLayout& source,const std::vector<int>& orde
         for (const auto& shape : shapes) {
             std::vector<BankPosition> positions;
             for (int i : order) if (source.items[i].width == shape.first && source.items[i].height == shape.second) positions.push_back(source.items[i].position);
-            std::sort(positions.begin(),positions.end(),[](const auto& a,const auto& b) { return std::tie(a.page,a.y,a.x) < std::tie(b.page,b.y,b.x); });
+            std::sort(positions.begin(),positions.end(),BankPositionLess);
             size_t n = 0;
             for (int i : order) if (source.items[i].width == shape.first && source.items[i].height == shape.second) target.items[i].position = positions[n++];
         }
@@ -264,13 +267,13 @@ inline bool BankSortTarget(const BankLayout& source,const std::vector<int>& orde
     if (mode == 7) std::stable_sort(blocks.begin(),blocks.end(),[](const auto& a,const auto& b) {
         return std::make_tuple(a.category,a.category == 5 && a.members.size() < 5,a.role) < std::make_tuple(b.category,b.category == 5 && b.members.size() < 5,b.role);
     });
-    int page = allPages ? 0 : currentPage, floor = 0, bottom = 0;
+    int page = allPages ? 0 : currentPage, left = 0, right = 0;
     int frontPage = -1, armorPage = -1;
     unsigned category = 99, role = 99;
     size_t budget = 500000;
     for (const auto& originalBlock : blocks) {
         const auto& block = originalBlock;
-        if (mode == 2 && (category != block.category || (block.category == 5 && role != block.role))) floor = bottom;
+        if (mode == 2 && (category != block.category || (block.category == 5 && role != block.role))) left = right;
         category = block.category; role = block.role;
         bool placed = false;
         const int start = mode == 2 ? page : (allPages ? 0 : currentPage);
@@ -305,9 +308,9 @@ inline bool BankSortTarget(const BankLayout& source,const std::vector<int>& orde
             if (placed) break;
             if (!allPages && p != currentPage) break;
             const auto& size = source.pages[p];
-            const int begin = mode == 2 && p == page ? floor : 0;
-            for (int y = begin; !placed && y + static_cast<int>(shape.height) <= size.height; ++y) {
-                for (int x = 0; !placed && x + static_cast<int>(shape.width) <= size.width; ++x) {
+            const int begin = mode == 2 && p == page ? left : 0;
+            for (int x = begin; !placed && x + static_cast<int>(shape.width) <= size.width; ++x) {
+                for (int y = 0; !placed && y + static_cast<int>(shape.height) <= size.height; ++y) {
                     bool fits = true;
                     for (const auto& member : shape.members) {
                         if (!budget) return false;
@@ -320,8 +323,8 @@ inline bool BankSortTarget(const BankLayout& source,const std::vector<int>& orde
                         target.items[member.item].position = position;
                         grid.Fill(source.items[member.item],position,member.item);
                     }
-                    if (p != page) { page = p; floor = bottom = 0; }
-                    bottom = std::max(bottom,y+static_cast<int>(shape.height));
+                    if (p != page) { page = p; left = right = 0; }
+                    right = std::max(right,x+static_cast<int>(shape.width));
                     if (block.category < 5) frontPage = std::max(frontPage,p);
                     placed = true;
                 }
@@ -454,7 +457,7 @@ inline bool BankLaneTarget(const BankLayout& source,const std::vector<int>& orde
         --remaining[block.height];
         std::vector<size_t> candidates;
         for (size_t n=0;n<lanes.size();++n) if (lanes[n].height>=int(block.height)) candidates.push_back(n);
-        std::sort(candidates.begin(),candidates.end(),[&](size_t a,size_t b) {const auto& x=lanes[a];const auto& y=lanes[b];return std::tie(x.page,x.y,x.x)<std::tie(y.page,y.y,y.x);});
+        std::sort(candidates.begin(),candidates.end(),[&](size_t a,size_t b) {const auto& x=lanes[a];const auto& y=lanes[b];return std::tie(x.page,x.x,x.y)<std::tie(y.page,y.x,y.y);});
         bool placed=false;
         for (size_t n:candidates) {
             auto& lane=lanes[n];
@@ -471,7 +474,7 @@ inline bool BankLaneTarget(const BankLayout& source,const std::vector<int>& orde
     for (const auto& group:groups) {
         std::vector<int> members;std::vector<BankPosition> positions;
         for (int i:order) if (std::make_tuple(BankCategory(source.items[i]),BankKind(source.items[i]),source.items[i].width,source.items[i].height)==group) {members.push_back(i);positions.push_back(target.items[i].position);}
-        std::sort(positions.begin(),positions.end(),[](const auto& a,const auto& b){return std::tie(a.page,a.y,a.x)<std::tie(b.page,b.y,b.x);});
+        std::sort(positions.begin(),positions.end(),BankPositionLess);
         for (size_t n=0;n<members.size();++n) target.items[members[n]].position=positions[n];
     }
     return grid.Build(target);
@@ -537,8 +540,8 @@ inline bool BankReservedTarget(const BankLayout& source,const std::vector<int>& 
         variants.push_back(std::move(vertical));
         bool placed=false;
         for (int p=int(source.pages.size())-1;p>=0 && !placed;--p) for (const auto& shape : variants) {
-            for (int y=source.pages[p].height-int(shape.height);y>=0 && !placed;--y)
-                for (int x=source.pages[p].width-int(shape.width);x>=0 && !placed;--x) placed=place(shape,p,x,y);
+            for (int x=source.pages[p].width-int(shape.width);x>=0 && !placed;--x)
+                for (int y=source.pages[p].height-int(shape.height);y>=0 && !placed;--y) placed=place(shape,p,x,y);
             if (placed) break;
         }
         if (!placed) return false;
@@ -547,8 +550,8 @@ inline bool BankReservedTarget(const BankLayout& source,const std::vector<int>& 
     for (const auto& block : front) {
         bool placed=false;
         for (int p=int(source.pages.size())-1;p>=0 && !placed;--p)
-            for (int y=source.pages[p].height-int(block.height);y>=0 && !placed;--y)
-                for (int x=source.pages[p].width-int(block.width);x>=0 && !placed;--x) placed=place(block,p,x,y);
+            for (int x=source.pages[p].width-int(block.width);x>=0 && !placed;--x)
+                for (int y=source.pages[p].height-int(block.height);y>=0 && !placed;--y) placed=place(block,p,x,y);
         if (!placed) return false;
     }
     for (int p = 0; p < int(source.pages.size()); ++p) {
@@ -738,11 +741,12 @@ inline BankPlan PlanBankSort(const BankLayout& source,int currentPage,bool allPa
     std::stable_sort(order.begin(),order.end(),[&](int a,int b) {
         if (keys[a]!=keys[b]) return keys[a]<keys[b];
         const auto& x=source.items[a];const auto& y=source.items[b];
-        return std::tie(x.position.page,x.position.y,x.position.x,x.id)<std::tie(y.position.page,y.position.y,y.position.x,y.id);
+        return std::tie(x.position.page,x.position.x,x.position.y,x.id)<std::tie(y.position.page,y.position.x,y.position.y,y.id);
     });
     BankLayout target = source;
     plan.error = "Not enough space for the sorted layout. Free some bank space.";
-    for (int mode : {6,7,9,8,2,1,3,0,4,5}) {
+    const std::vector<int> modes=allPages ? std::vector<int>{6,7,9,8,2,1,3,0,4,5} : std::vector<int>{1,9,2,3,0,4,5};
+    for (int mode : modes) {
         if (mode >= 6 && mode!=9 && !allPages) continue;
         const bool packed=mode==9 && !allPages ? BankSingleLaneTarget(source,order,currentPage,target) :
             mode==8 || mode==9 ? BankReservedTarget(source,order,target,mode==9) : BankSortTarget(source,order,currentPage,allPages,mode,target);
@@ -753,7 +757,7 @@ inline BankPlan PlanBankSort(const BankLayout& source,int currentPage,bool allPa
             std::vector<BankPosition> positions;
             std::vector<int> remaining;
             for (size_t n=begin;n<end;++n) positions.push_back(target.items[order[n]].position);
-            std::sort(positions.begin(),positions.end(),[](const auto& a,const auto& b) {return std::tie(a.page,a.y,a.x)<std::tie(b.page,b.y,b.x);});
+            std::sort(positions.begin(),positions.end(),BankPositionLess);
             for (size_t n=begin;n<end;++n) {
                 const int i=order[n];const auto found=std::find(positions.begin(),positions.end(),source.items[i].position);
                 if (found!=positions.end()) {target.items[i].position=*found;positions.erase(found);}

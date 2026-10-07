@@ -152,8 +152,8 @@ static int loadoutEditing=-1, loadoutCapture=-2;
 static uint64_t loadoutResponse=0;
 static std::string loadoutMessage;
 static RECT loadoutArea{};
-static RECT loadoutListButton{},loadoutAddButton{},loadoutNameArea{};
-static bool LoadoutContains(POINT point) { return PtInRect(&loadoutArea,point) || PtInRect(&loadoutListButton,point) || PtInRect(&loadoutAddButton,point); }
+static RECT loadoutListButton{},loadoutSortButton{},loadoutNameArea{};
+static bool LoadoutContains(POINT point) { return PtInRect(&loadoutArea,point) || PtInRect(&loadoutListButton,point) || PtInRect(&loadoutSortButton,point); }
 static AddonInputTest loadoutInputTest=nullptr;
 static bool LoadoutInput(HWND,UINT,WPARAM,LPARAM);
 static MoveLayoutSettings moveOptions, draftMoveOptions;
@@ -629,6 +629,8 @@ struct HelpRequest {
     UiPoint position, scale;
     float otherEdge = 0;
     bool native = false;
+    RECT anchor{};
+    bool attached = false;
 };
 static HelpRequest help;
 
@@ -711,23 +713,43 @@ static bool HoverArea(UiPoint a, UiPoint size) {
 static void QueueHelp(const char* text, UiPoint right, UiPoint scale, float left, bool native = false) {
     help = {text, right, scale, left, native};
 }
+static void QueueButtonHelp(const char* text,UiPoint position,UiPoint size,UiPoint scale) {
+    QueueHelp(text,position,scale,position.x,true);
+    help.anchor=Rectangle(position,size); help.attached=true;
+}
 
 static void DrawHelp() {
     helpRect = {};
     if (help.text.empty()) return;
     const UiPoint display = Ui::GetIO().DisplaySize;
     const UiPoint scale = FitScale(help.scale, UiPoint(205, 300));
-    const float width = (help.native ? 190 : 205) * scale.x, padding = (help.native ? 11 : 24) * scale.x;
+    const float padding = (help.native ? 11 : 24) * scale.x;
     const float textSize = help.native ? valueFont->SizeForEm(14 * scale.y) : 14 * scale.y;
+    const float naturalWidth=valueFont->CalcTextSizeA(textSize,FLT_MAX,0,help.text.c_str()).x+padding*2;
+    const float width=help.attached ? std::clamp(naturalWidth,84*scale.x,190*scale.x) : (help.native ? 190 : 205)*scale.x;
     const UiPoint extent = valueFont->CalcTextSizeA(textSize, FLT_MAX, width - padding * 2, help.text.c_str());
     const UiPoint size(width, extent.y + (help.native ? 12 : 36) * scale.y);
     UiPoint position = help.position;
-    if (position.x + size.x > display.x - 8) position.x = help.otherEdge - size.x - 5 * scale.x;
+    if (help.attached) {
+        position.x=(help.anchor.left+help.anchor.right)*.5f-size.x*.5f;
+        position.y=help.anchor.top-size.y-6*scale.y;
+        if (position.y<8) position.y=help.anchor.bottom+6*scale.y;
+    } else if (position.x + size.x > display.x - 8) position.x = help.otherEdge - size.x - 5 * scale.x;
     position.x = std::clamp(position.x, 8.0f, std::max(8.0f, display.x - size.x - 8));
     position.y = std::clamp(position.y, 8.0f, std::max(8.0f, display.y - size.y - 8));
     UiDrawList* draw = Ui::GetForegroundDrawList();
     if (help.native) {
         nativeSkin.Tooltip(draw, position, size, scale);
+        if (help.attached) {
+            const bool below=position.y>=help.anchor.bottom;
+            if (below || position.y+size.y<=help.anchor.top) {
+                const float tip=std::clamp((help.anchor.left+help.anchor.right)*.5f,position.x+10*scale.x,position.x+size.x-10*scale.x);
+                const float edge=below ? position.y : position.y+size.y;
+                const float point=below ? help.anchor.bottom+1.0f : help.anchor.top-1.0f;
+                draw->AddLine({tip-5*scale.x,edge},{tip,point},UI_COLOR(112,82,34,255),std::max(1.0f,scale.y));
+                draw->AddLine({tip,point},{tip+5*scale.x,edge},UI_COLOR(112,82,34,255),std::max(1.0f,scale.y));
+            }
+        }
         draw->AddText(valueFont,textSize,At(position,scale,11,6),UI_WHITE,help.text.c_str(),nullptr,width - padding * 2);
     } else {
         nativeSkin.Frame(draw, position, size, scale);
@@ -1690,12 +1712,15 @@ static void DrawMoveEditor() {
     Ui::End();
 }
 
-static void DrawStorageSort(const BankSortFrame& frame,unsigned& action,RECT& area,bool inventory) {
-    static std::array<std::string,2> lastMessages;
-    static std::array<uint64_t,2> messageTimes{};
-    auto& lastMessage=lastMessages[inventory ? 1 : 0]; auto& messageUntil=messageTimes[inventory ? 1 : 0];
+static void DrawBankSort() {
+    const auto& frame=bankFrame;
+    auto& action=bankAction;
+    auto& area=bankArea;
+    static std::string lastMessage;
+    static uint64_t messageUntil=0;
+    static bool lastPages=false;
     area = {};
-    if (!addonRegistry.Loadouts() || (!bankEnabled && !frame.busy) || !frame.visible || addonsOpen || reportOpen || (inventory && loadoutOpen)) { lastMessage.clear(); messageUntil = 0; return; }
+    if (!addonRegistry.Loadouts() || (!bankEnabled && !frame.busy) || !frame.visible || addonsOpen || reportOpen) { lastMessage.clear(); messageUntil = 0; return; }
     if (lastMessage != frame.message) {
         lastMessage = frame.message;
         messageUntil = !lastMessage.empty() && !frame.busy ? WindowsCompat::Milliseconds()+8000 : 0;
@@ -1704,8 +1729,11 @@ static void DrawStorageSort(const BankSortFrame& frame,unsigned& action,RECT& ar
     const float width = frame.width, height = frame.height;
     const UiPoint size(width*scale.x,height*scale.y);
     const UiPoint origin(frame.x*scale.x,frame.y*scale.y);
+    const float half=(width-8)*.5f;
+    UiPoint helpPosition=At(origin,scale,lastPages ? half+8 : 0,0);
+    UiPoint helpSize(half*scale.x,height*scale.y);
     Ui::SetNextWindowPos(origin); Ui::SetNextWindowSize(size);
-    if (Ui::Begin(inventory ? "##InventorySort" : "##BankSort",nullptr,SurfaceFlags | Ui::NoSavedSettings)) {
+    if (Ui::Begin("##BankSort",nullptr,SurfaceFlags | Ui::NoSavedSettings)) {
         RegisterHitArea(); area = Rectangle(origin,size);
         const auto button = [&](const char* id,const char* label,float x,float buttonWidth) {
             const auto position = At(origin,scale,x,0);
@@ -1713,32 +1741,29 @@ static void DrawStorageSort(const BankSortFrame& frame,unsigned& action,RECT& ar
             Ui::SetCursorScreenPos(position);
             const bool clicked = Ui::InvisibleButton(id,extent);
             nativeSkin.CompactButton(Ui::GetWindowDrawList(),position,extent,scale,Ui::IsItemHovered(),Ui::IsItemActive(),label);
+            if (clicked || Ui::IsItemHovered()) { helpPosition=position; helpSize=extent; }
             return clicked;
         };
         if (frame.busy) {
+            helpPosition=At(origin,scale,width-108,0); helpSize={108*scale.x,height*scale.y};
             const auto progress = frame.total ? "Sorting " + std::to_string(frame.completed) + " / " + std::to_string(frame.total) : std::string("Planning...");
             BodyText(Ui::GetWindowDrawList(),progress.c_str(),At(origin,scale,2,3),UiPoint(scale.x*.85f,scale.y*.85f));
             if (button("CancelSort","Cancel",width-108,108)) action = 3;
         } else {
-            Ui::BeginDisabled(!frame.available || loadoutFrame.busy || (inventory ? bankFrame.busy : inventoryFrame.busy) || loadoutCommand.kind==LoadoutCommand::Kind::Equip);
-            const float half = (width-8)*.5f;
-            if (inventory) { if (button("SortInventory","Sort Inventory",0,width)) action=1; }
-            else {
-                if (button("SortPage","Sort Page",0,half)) action = 1;
-                if (button("SortPages","Sort Pages",half+8,half)) {
-                    if (bankAvailable!=frame.pages) { bankAvailable=frame.pages; bankSelected={frame.pages.begin(),frame.pages.end()}; }
-                    bankPagePicker=!bankPagePicker;
-                }
+            Ui::BeginDisabled(!frame.available || loadoutFrame.busy || inventoryFrame.busy || loadoutCommand.kind==LoadoutCommand::Kind::Equip);
+            if (button("SortPage","Sort Page",0,half)) { action = 1; lastPages=false; }
+            if (button("SortPages","Sort Pages",half+8,half)) {
+                lastPages=true;
+                if (bankAvailable!=frame.pages) { bankAvailable=frame.pages; bankSelected={frame.pages.begin(),frame.pages.end()}; }
+                bankPagePicker=!bankPagePicker;
             }
             Ui::EndDisabled();
         }
-        const auto* status = frame.message.empty() ? (inventory ? "Sort Inventory: groups items using the same order as Bank." : "Sort Page: current page. Sort Pages: choose which pages to sort.") : frame.message.c_str();
-        if (Ui::IsWindowHovered() || WindowsCompat::Milliseconds() < messageUntil) QueueHelp(status,At(origin,scale,width+5,0),scale,origin.x,true);
+        const auto* status = frame.message.empty() ? "Sort Page: current page. Sort Pages: choose which pages to sort." : frame.message.c_str();
+        if (!bankPagePicker && (Ui::IsWindowHovered() || WindowsCompat::Milliseconds() < messageUntil)) QueueButtonHelp(status,helpPosition,helpSize,scale);
     }
     Ui::End();
 }
-
-static void DrawBankSort() { DrawStorageSort(bankFrame,bankAction,bankArea,false); }
 
 static void DrawBankPagePicker() {
     bankPickerArea={};
@@ -1762,7 +1787,7 @@ static void DrawBankPagePicker() {
             Ui::SetCursorScreenPos(at); Ui::PushID(static_cast<int>(id));
             Ui::BeginDisabled(!bankFrame.available || inventoryFrame.busy || loadoutFrame.busy);
             if (Ui::InvisibleButton("Page",{78*scale.x,26*scale.y})) { if (!bankSelected.erase(id)) bankSelected.insert(id); }
-            const auto label=std::string(bankSelected.count(id) ? "[x] " : "[ ] ")+std::to_string(id>1 ? id-1 : id);
+            const auto label=std::string(bankSelected.count(id) ? "[x] " : "[ ] ")+std::to_string(i+1);
             nativeSkin.CompactButton(Ui::GetWindowDrawList(),at,{78*scale.x,26*scale.y},scale,Ui::IsItemHovered(),Ui::IsItemActive(),label.c_str());
             Ui::EndDisabled(); Ui::PopID();
         }
@@ -2328,7 +2353,7 @@ extern "C" __declspec(dllexport) int __cdecl MeterOverlayStart(const char* iniFi
     leaderboardOpen=leaderboardWeek=false; leaderboardCategory=Leaderboard::Category::Level; leaderboardBoard.reset(); leaderboardRows.clear(); leaderboardPage=0;
     leaderboardArea=leaderboardButtonRect={};
     loadoutStore.Initialize(addonsDirectory/L"Loadouts");
-    loadoutFrame={}; loadoutCommand={}; loadoutOpen=loadoutEditor=loadoutDelete=loadoutRenaming=false; loadoutKeys={}; loadoutCapture=-2; loadoutArea=loadoutListButton=loadoutAddButton=loadoutNameArea={};
+    loadoutFrame={}; loadoutCommand={}; loadoutOpen=loadoutEditor=loadoutDelete=loadoutRenaming=false; loadoutKeys={}; loadoutCapture=-2; loadoutArea=loadoutListButton=loadoutSortButton=loadoutNameArea={};
     cursorSettings = addonsDirectory / L"CursorCircle" / L"settings.ini";
     cursorOptions = {}; cursorCombatUntil = 0;
     { std::ifstream input(cursorSettings); cursorOptions.Load(input); }
@@ -2516,8 +2541,8 @@ extern "C" void __cdecl MeterOverlayLayer(IDirect3DDevice9* device,AddonUiLayer 
     else if (layer == AddonUiLayer::CharacterSheet) DrawCharacterSheet();
     else if (layer == AddonUiLayer::Bank) { help.text.clear(); DrawBankSort(); DrawBankPagePicker(); DrawHelp(); }
     else if (layer == AddonUiLayer::Inventory) {
-        if (loadoutFrame.visible && addonRegistry.Loadouts()) { help.text.clear(); DrawLoadouts(); DrawStorageSort(inventoryFrame,inventoryAction,inventoryArea,true); DrawHelp(); }
-        else loadoutArea=loadoutListButton=loadoutAddButton=loadoutNameArea={};
+        if (loadoutFrame.visible && addonRegistry.Loadouts()) { help.text.clear(); DrawLoadouts(); DrawHelp(); }
+        else loadoutArea=loadoutListButton=loadoutSortButton=loadoutNameArea=inventoryArea={};
     }
     else DrawCooldowns(now,layer);
     Ui::Flush();
