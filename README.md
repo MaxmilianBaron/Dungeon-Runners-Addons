@@ -2,9 +2,11 @@
 
 # Dungeon Runners Addons
 
-[![Windows Installer](https://img.shields.io/badge/%E2%80%8B-Installer-2563EB?style=for-the-badge&logo=data%3Aimage%2Fsvg%2Bxml%3Bbase64%2CPHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI%2BPHBhdGggZmlsbD0id2hpdGUiIGQ9Ik0wIDBoMTF2MTFIMHpNMTMgMGgxMXYxMUgxM3pNMCAxM2gxMXYxMUgwek0xMyAxM2gxMXYxMUgxM3oiLz48L3N2Zz4%3D)](https://github.com/MaxmilianBaron/Dungeon-Runners-Addons/releases/latest/download/Dungeon-Runners-Addons.zip "Windows Installer")
-[![Mac Installer](https://img.shields.io/badge/%E2%80%8B-Installer-2563EB?style=for-the-badge&logo=apple&logoColor=white)](https://github.com/MaxmilianBaron/Dungeon-Runners-Addons/releases/latest/download/Dungeon-Runners-Addons-Mac.zip "Mac Installer")
-[![Linux Installer](https://img.shields.io/badge/%E2%80%8B-Installer-2563EB?style=for-the-badge&logo=linux&logoColor=white)](https://github.com/MaxmilianBaron/Dungeon-Runners-Addons/releases/latest/download/Dungeon-Runners-Addons-Linux.zip "Linux Installer")
+[![Windows Installer](https://raw.githubusercontent.com/MaxmilianBaron/Dungeon-Runners-Launcher/main/.github/windows-installer.svg)](https://github.com/MaxmilianBaron/Dungeon-Runners-Launcher "Windows Installer")
+[![Mac Installer](https://img.shields.io/badge/%E2%80%8B-Installer-2563EB?style=for-the-badge&logo=apple&logoColor=white)](https://github.com/MaxmilianBaron/Dungeon-Runners-Launcher "Mac Installer")
+[![Linux Installer](https://img.shields.io/badge/%E2%80%8B-Installer-2563EB?style=for-the-badge&logo=linux&logoColor=white)](https://github.com/MaxmilianBaron/Dungeon-Runners-Launcher "Linux Installer")
+[![Steam Deck Installer](https://img.shields.io/badge/%E2%80%8B-Installer-2563EB?style=for-the-badge&logo=steamdeck&logoColor=white)](https://github.com/MaxmilianBaron/Dungeon-Runners-Launcher "Steam Deck Installer")
+[![Android Installer](https://img.shields.io/badge/%E2%80%8B-Installer-2563EB?style=for-the-badge&logo=android&logoColor=white)](https://github.com/MaxmilianBaron/Dungeon-Runners-Launcher "Android Installer")
 
 </div>
 
