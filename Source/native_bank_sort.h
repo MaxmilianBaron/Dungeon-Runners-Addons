@@ -59,32 +59,45 @@ class NativeBankSort {
         } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
         return true;
     }
-    static void Footer(const NativeReader& r,uintptr_t inventory,uintptr_t ui,BankSortFrame& output) {
+    static void Status(const NativeReader& r,uintptr_t bank,uintptr_t inventory,uintptr_t ui,BankSortFrame& output) {
         struct Rect { int32_t x=0,y=0,width=0,height=0; } left,right;
-        const auto parent=r.Pointer(inventory+0x14);
+        uintptr_t parent=0;
+        int32_t inventoryY=0;
         std::set<uintptr_t> seen;
+        for (auto node=inventory;node && node!=ui;node=r.Pointer(node+0x14)) {
+            uint32_t flags=0;
+            if (seen.size()>=32 || !seen.insert(node).second || !r.Read(node+0xb4,flags) || !(flags&8)) return;
+            if (r.String(node+0x10,96)=="BankControl") { parent=node; break; }
+            int32_t y=0;
+            if (node==bank || !r.Read(node+0xf4,y) || std::abs(int64_t(y))>16384) return;
+            inventoryY+=y;
+        }
+        if (!parent) return;
+        seen.clear();
         for (auto child=r.Pointer(parent+0x18);child;child=r.Pointer(child+0x20)) {
             if (seen.size()>=64 || !seen.insert(child).second || r.Pointer(child+0x14)!=parent) return;
             const auto name=r.String(child+0x10,96);
-            if (name!="TURDS Currency" && name!="CoinsIcon") continue;
+            if (name!="Label" && name!="Close") continue;
             uint32_t flags=0;
             Rect rect;
             if (!r.Read(child+0xb4,flags) || !(flags&8) || !r.Read(child+0xf0,rect) || rect.x<0 || rect.y<0 || rect.width<=0 || rect.height<=0 ||
                 rect.x>4096 || rect.y>4096 || rect.width>4096 || rect.height>128) return;
-            (name=="TURDS Currency" ? left : right)=rect;
+            (name=="Label" ? left : right)=rect;
         }
         const int32_t x=left.x+left.width+4,width=right.x-x-4;
         int32_t parentWidth=0,parentHeight=0;
-        if (!left.width || !right.width || width<48 || width>512 || std::abs(left.y-right.y)>8 || !r.Read(parent+0xf8,parentWidth) ||
-            !r.Read(parent+0xfc,parentHeight) || x+width>parentWidth || left.y+left.height>parentHeight) return;
+        if (!left.width || !right.width || width<48 || width>512 || std::abs(left.y-right.y)>32 || !r.Read(parent+0xf8,parentWidth) ||
+            !r.Read(parent+0xfc,parentHeight) || x+width>parentWidth) return;
+        const int32_t y=std::max(right.y,left.y-4),bottom=std::min(left.y+left.height,inventoryY-30),height=bottom-y;
+        if (height<16 || height>48 || y<0 || bottom>parentHeight) return;
         float originX=0,originY=0;
         seen.clear();
         for (auto node=parent;node;node=r.Pointer(node+0x14)) {
             uint32_t flags=0;
             if (seen.size()>=32 || !seen.insert(node).second || !r.Read(node+0xb4,flags) || !(flags&8)) return;
             if (node==ui) {
-                output.footerX=originX+x; output.footerY=originY+left.y;
-                output.footerWidth=static_cast<float>(width); output.footerHeight=static_cast<float>(left.height);
+                output.statusX=originX+x; output.statusY=originY+y;
+                output.statusWidth=static_cast<float>(width); output.statusHeight=static_cast<float>(height);
                 return;
             }
             int32_t nx=0,ny=0;
@@ -97,6 +110,7 @@ class NativeBankSort {
         int32_t width = 0, height = 0;
         if (!inventory || !r.Read(inventory+0xf8,width) || !r.Read(inventory+0xfc,height) || width < 160 || height < 80 || width > 2048 || height > 2048) return false;
         output.x = 0; output.y = -26; output.visible = false;
+        output.statusX=output.statusY=output.statusWidth=output.statusHeight=0;
         output.width = static_cast<float>(width); output.height = 22;
         std::set<uintptr_t> seen;
         for (auto node = inventory; node; node = r.Pointer(node+0x14)) {
@@ -104,7 +118,7 @@ class NativeBankSort {
             if (seen.size() == 32 || !seen.insert(node).second || !r.Read(node+0xb4,flags) || !(flags&8)) return false;
             if (node == ui) {
                 output.visible = seen.count(bank) != 0;
-                if (output.visible && inventoryMode) Footer(r,inventory,ui,output);
+                if (output.visible && !inventoryMode) Status(r,bank,inventory,ui,output);
                 return output.visible;
             }
             int32_t x = 0, y = 0;

@@ -947,7 +947,7 @@ public:
 struct BankSortFrame {
     bool visible = false, busy = false, available = false;
     float x = 0, y = 0, width = 0, height = 0;
-    float footerX = 0, footerY = 0, footerWidth = 0, footerHeight = 0;
+    float statusX = 0, statusY = 0, statusWidth = 0, statusHeight = 0;
     unsigned completed = 0, total = 0;
     std::vector<unsigned> pages;
     std::string message;
