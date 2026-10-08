@@ -1,6 +1,7 @@
 #pragma once
 #include "native_reader.h"
 #include "bank_sort.h"
+#include "inventory_sort.h"
 #include <future>
 
 class NativeBankSort {
@@ -250,7 +251,7 @@ public:
             const auto ui = reader.Pointer(image+0x5314b0), bank = reader.Pointer(ui+(inventoryMode ? 0x230 : 0x23c));
             if (!reader.InWorld() || bank != window || !Geometry(reader,bank,ui,frame,inventoryMode)) planningCancelled = true;
             if (planning.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready) {
-                frame.busy = !planningCancelled; frame.message = "Planning bank layout...";
+                frame.busy = !planningCancelled; frame.message = inventoryMode ? "Planning inventory layout..." : "Planning bank layout...";
                 return;
             }
             try {
@@ -289,7 +290,9 @@ public:
         if (!session.Busy() && enabled && focused && (action == 1 || action == 2)) {
             owner = sample.unit; window = sample.bank;
             planningSource = sample.layout; planningCancelled = false;
-            try { planning = std::async(std::launch::async,[layout=sample.layout,page=sample.selected,all=action==2,pages=selectedPages] { return PlanSelectedBankSort(layout,all ? pages : std::vector<unsigned>{layout.pages[page].id}); }); }
+            try { planning = std::async(std::launch::async,[layout=sample.layout,page=sample.selected,all=action==2,pages=selectedPages,inventory=inventoryMode] {
+                return inventory ? PlanInventorySort(layout,page) : PlanSelectedBankSort(layout,all ? pages : std::vector<unsigned>{layout.pages[page].id});
+            }); }
             catch (...) { planningSource = {}; session.Stop("Bank layout could not be prepared."); }
         }
         if (session.Busy()) {
@@ -301,6 +304,6 @@ public:
         }
         frame.busy = session.Busy() || planning.valid();
         frame.completed = static_cast<unsigned>(session.Completed()); frame.total = static_cast<unsigned>(session.Total());
-        frame.message = planning.valid() ? "Planning bank layout..." : session.Message();
+        frame.message = planning.valid() ? (inventoryMode ? "Planning inventory layout..." : "Planning bank layout...") : session.Message();
     }
 };

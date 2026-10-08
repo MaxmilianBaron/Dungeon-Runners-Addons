@@ -150,7 +150,7 @@ static void DrawLoadouts() {
                 else if (loadoutOpen) CloseLoadouts(); else loadoutOpen=true;
             }
             if (!loadoutOpen && (Ui::IsItemHovered() || (i && WindowsCompat::Milliseconds()<sortMessageUntil))) {
-                const auto text=i ? (inventoryFrame.busy ? "Cancel inventory sorting." : inventoryFrame.message.empty() ? "Sort Inventory down the left column, then continue to the right." : inventoryFrame.message.c_str()) : "Equip or manage your saved loadouts.";
+                const auto text=i ? (inventoryFrame.busy ? "Cancel inventory sorting." : inventoryFrame.message.empty() ? "Group coins and potions, pack equipment and leave room for loot." : inventoryFrame.message.c_str()) : "Equip or manage your saved loadouts.";
                 QueueButtonHelp(text,at,size,gameScale);
             }
             Ui::EndDisabled();
