@@ -118,8 +118,6 @@ static bool LoadoutButton(const char* id,const char* label,UiPoint origin,UiPoin
     return clicked;
 }
 static void DrawLoadouts() {
-    static std::string sortMessage;
-    static uint64_t sortMessageUntil=0;
     loadoutArea=loadoutListButton=loadoutSortButton=loadoutNameArea=inventoryArea={};
     if (!addonRegistry.Loadouts() || !loadoutFrame.visible || addonsOpen || reportOpen || moveEditing) return;
     if (loadoutStore.Owner()!=loadoutFrame.owner) { CloseLoadouts(); loadoutCapture=-2; loadoutMessage.clear(); loadoutStore.Select(loadoutFrame.owner); }
@@ -128,10 +126,6 @@ static void DrawLoadouts() {
     if (loadoutFrame.titleWidth<160 || loadoutFrame.titleHeight<12 || loadoutFrame.titleHeight>64) return;
     const auto display=Ui::GetIO().DisplaySize;
     const auto gameScale=GameScale();
-    if (sortMessage!=inventoryFrame.message) {
-        sortMessage=inventoryFrame.message;
-        sortMessageUntil=!sortMessage.empty() && !inventoryFrame.busy ? WindowsCompat::Milliseconds()+8000 : 0;
-    }
     const UiPoint title((loadoutFrame.titleX+loadoutFrame.titleWidth*.5f)*gameScale.x,loadoutFrame.titleY*gameScale.y);
     const bool busy=loadoutFrame.busy || bankFrame.busy || inventoryFrame.busy || loadoutCapture!=-2 || loadoutCommand.kind==LoadoutCommand::Kind::Equip;
     for (unsigned i=0;i<2;++i) {
@@ -149,8 +143,8 @@ static void DrawLoadouts() {
                 if (i) { inventoryAction=inventoryFrame.busy ? 3 : 1; CloseLoadouts(); }
                 else if (loadoutOpen) CloseLoadouts(); else loadoutOpen=true;
             }
-            if (!loadoutOpen && (Ui::IsItemHovered() || (i && WindowsCompat::Milliseconds()<sortMessageUntil))) {
-                const auto text=i ? (inventoryFrame.busy ? "Cancel inventory sorting." : inventoryFrame.message.empty() ? "Sort Inventory down the left column, then continue to the right." : inventoryFrame.message.c_str()) : "Equip or manage your saved loadouts.";
+            if (!loadoutOpen && Ui::IsItemHovered()) {
+                const auto text=i ? (inventoryFrame.busy ? "Cancel inventory sorting." : "Sort Inventory down the left column, then continue to the right.") : "Equip or manage your saved loadouts.";
                 QueueButtonHelp(text,at,size,gameScale);
             }
             Ui::EndDisabled();

@@ -1712,26 +1712,60 @@ static void DrawMoveEditor() {
     Ui::End();
 }
 
+static void DrawSortingStatus() {
+    static std::string lastBankMessage,lastInventoryMessage;
+    static bool bankLatest=false;
+    if (lastBankMessage!=bankFrame.message) {
+        lastBankMessage=bankFrame.message;
+        if (!lastBankMessage.empty()) bankLatest=true;
+    }
+    if (lastInventoryMessage!=inventoryFrame.message) {
+        lastInventoryMessage=inventoryFrame.message;
+        if (!lastInventoryMessage.empty()) bankLatest=false;
+    }
+    if (!addonRegistry.Loadouts() || !bankEnabled || !inventoryFrame.visible || addonsOpen || reportOpen || moveEditing ||
+        inventoryFrame.footerWidth<=0 || inventoryFrame.footerHeight<=0) return;
+    const auto& frame=inventoryFrame.busy ? inventoryFrame : bankFrame.busy ? bankFrame : bankLatest ? bankFrame : inventoryFrame;
+    const auto status=frame.busy ? (frame.total ? "Sorting "+std::to_string(frame.completed)+" / "+std::to_string(frame.total) : std::string("Planning...")) : frame.message;
+    if (status.empty()) return;
+    const auto scale=GameScale();
+    const UiPoint origin(inventoryFrame.footerX*scale.x,inventoryFrame.footerY*scale.y);
+    const UiPoint size(inventoryFrame.footerWidth*scale.x,inventoryFrame.footerHeight*scale.y);
+    const auto display=Ui::GetIO().DisplaySize;
+    if (origin.x<0 || origin.y<0 || origin.x+size.x>display.x || origin.y+size.y>display.y) return;
+    Ui::SetNextWindowPos(origin); Ui::SetNextWindowSize(size);
+    if (Ui::Begin("##SortingStatus",nullptr,SurfaceFlags|Ui::NoInputs|Ui::NoSavedSettings)) {
+        std::string label=status;
+        const float textSize=valueFont->SizeForEm(13*scale.y);
+        const float room=size.x-4*scale.x;
+        if (valueFont->CalcTextSizeA(textSize,FLT_MAX,0,label.c_str()).x>room) {
+            while (!label.empty()) {
+                label.pop_back();
+                if (valueFont->CalcTextSizeA(textSize,FLT_MAX,0,(label+"...").c_str()).x<=room) break;
+            }
+            label+="...";
+        }
+        const auto extent=valueFont->CalcTextSizeA(textSize,FLT_MAX,0,label.c_str());
+        auto* draw=Ui::GetWindowDrawList();
+        draw->PushClipRect(origin,{origin.x+size.x,origin.y+size.y});
+        draw->AddText(valueFont,textSize,{std::round(origin.x+(size.x-extent.x)*.5f),std::round(origin.y+(size.y-extent.y)*.5f)},UI_WHITE,label.c_str());
+        draw->PopClipRect();
+        if (label!=status && !loadoutOpen && !bankPagePicker && Ui::IsMouseHoveringRect(origin,{origin.x+size.x,origin.y+size.y})) QueueButtonHelp(status.c_str(),origin,size,scale);
+    }
+    Ui::End();
+}
+
 static void DrawBankSort() {
     const auto& frame=bankFrame;
     auto& action=bankAction;
     auto& area=bankArea;
-    static std::string lastMessage;
-    static uint64_t messageUntil=0;
-    static bool lastPages=false;
     area = {};
-    if (!addonRegistry.Loadouts() || (!bankEnabled && !frame.busy) || !frame.visible || addonsOpen || reportOpen) { lastMessage.clear(); messageUntil = 0; return; }
-    if (lastMessage != frame.message) {
-        lastMessage = frame.message;
-        messageUntil = !lastMessage.empty() && !frame.busy ? WindowsCompat::Milliseconds()+8000 : 0;
-    }
+    if (!addonRegistry.Loadouts() || (!bankEnabled && !frame.busy) || !frame.visible || addonsOpen || reportOpen) return;
     const auto scale = GameScale();
     const float width = frame.width, height = frame.height;
     const UiPoint size(width*scale.x,height*scale.y);
     const UiPoint origin(frame.x*scale.x,frame.y*scale.y);
     const float half=(width-8)*.5f;
-    UiPoint helpPosition=At(origin,scale,lastPages ? half+8 : 0,0);
-    UiPoint helpSize(half*scale.x,height*scale.y);
     Ui::SetNextWindowPos(origin); Ui::SetNextWindowSize(size);
     if (Ui::Begin("##BankSort",nullptr,SurfaceFlags | Ui::NoSavedSettings)) {
         RegisterHitArea(); area = Rectangle(origin,size);
@@ -1741,26 +1775,22 @@ static void DrawBankSort() {
             Ui::SetCursorScreenPos(position);
             const bool clicked = Ui::InvisibleButton(id,extent);
             nativeSkin.CompactButton(Ui::GetWindowDrawList(),position,extent,scale,Ui::IsItemHovered(),Ui::IsItemActive(),label);
-            if (clicked || Ui::IsItemHovered()) { helpPosition=position; helpSize=extent; }
+            if (Ui::IsItemHovered() && !bankPagePicker) QueueButtonHelp(frame.busy ? "Cancel bank sorting." : x ? "Choose which bank pages to sort." : "Sort the current bank page.",position,extent,scale);
             return clicked;
         };
         if (frame.busy) {
-            helpPosition=At(origin,scale,width-108,0); helpSize={108*scale.x,height*scale.y};
             const auto progress = frame.total ? "Sorting " + std::to_string(frame.completed) + " / " + std::to_string(frame.total) : std::string("Planning...");
             BodyText(Ui::GetWindowDrawList(),progress.c_str(),At(origin,scale,2,3),UiPoint(scale.x*.85f,scale.y*.85f));
             if (button("CancelSort","Cancel",width-108,108)) action = 3;
         } else {
             Ui::BeginDisabled(!frame.available || loadoutFrame.busy || inventoryFrame.busy || loadoutCommand.kind==LoadoutCommand::Kind::Equip);
-            if (button("SortPage","Sort Page",0,half)) { action = 1; lastPages=false; }
+            if (button("SortPage","Sort Page",0,half)) action = 1;
             if (button("SortPages","Sort Pages",half+8,half)) {
-                lastPages=true;
                 if (bankAvailable!=frame.pages) { bankAvailable=frame.pages; bankSelected={frame.pages.begin(),frame.pages.end()}; }
                 bankPagePicker=!bankPagePicker;
             }
             Ui::EndDisabled();
         }
-        const auto* status = frame.message.empty() ? "Sort Page: current page. Sort Pages: choose which pages to sort." : frame.message.c_str();
-        if (!bankPagePicker && (Ui::IsWindowHovered() || WindowsCompat::Milliseconds() < messageUntil)) QueueButtonHelp(status,helpPosition,helpSize,scale);
     }
     Ui::End();
 }
@@ -2541,7 +2571,7 @@ extern "C" void __cdecl MeterOverlayLayer(IDirect3DDevice9* device,AddonUiLayer 
     else if (layer == AddonUiLayer::CharacterSheet) DrawCharacterSheet();
     else if (layer == AddonUiLayer::Bank) { help.text.clear(); DrawBankSort(); DrawBankPagePicker(); DrawHelp(); }
     else if (layer == AddonUiLayer::Inventory) {
-        if (loadoutFrame.visible && addonRegistry.Loadouts()) { help.text.clear(); DrawLoadouts(); DrawHelp(); }
+        if (loadoutFrame.visible && addonRegistry.Loadouts()) { help.text.clear(); DrawLoadouts(); DrawSortingStatus(); DrawHelp(); }
         else loadoutArea=loadoutListButton=loadoutSortButton=loadoutNameArea=inventoryArea={};
     }
     else DrawCooldowns(now,layer);
