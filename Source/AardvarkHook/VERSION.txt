@@ -1,0 +1,2 @@
+AardvarkHook - Dungeon Runners adapter
+Signature-checked x86 entry patches with fixed instruction boundaries.

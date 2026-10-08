@@ -1,0 +1,991 @@
+#include <windows.h>
+#include "windows_compat.h"
+#include <d3d9.h>
+#include "windows_hash.h"
+#include <filesystem>
+#include <fstream>
+#include <mutex>
+#include <stdexcept>
+#include "AardvarkHook/patch.h"
+#include "native_reader.h"
+#include "native_nameplates.h"
+#include "native_hotkeys.h"
+#include "native_controller.h"
+#include "native_mouse_look.h"
+#include "mouse_look_hooks.h"
+#include "native_cooldowns.h"
+#include "native_character_sheet.h"
+#include "native_mythic_sounds.h"
+#include "native_wishing_well.h"
+#include "native_hooks.h"
+#include "native_chat.h"
+#include "native_archive.h"
+#include "native_history.h"
+#include "addon_api.h"
+#include "native_catalog.generated.h"
+#include "combat_cursor.h"
+#include "unbind_left_click.h"
+#include "native_bank_sort.h"
+#include "native_loadouts.h"
+#include "native_move_layout.h"
+#include "move_projection.h"
+#include "client_compatibility.h"
+
+extern "C" int __cdecl MeterOverlayStart(const char*);
+extern "C" int __cdecl MeterOverlayUpdate(const void*, unsigned);
+extern "C" void __cdecl MeterOverlayMenu(float, float, float, float);
+extern "C" void __cdecl MeterOverlayUiSize(int, int);
+extern "C" void __cdecl MeterOverlayLayer(IDirect3DDevice9*,AddonUiLayer);
+extern "C" void __cdecl MeterOverlayEndFrame();
+extern "C" void __cdecl MeterOverlayInputTest(AddonInputTest);
+extern "C" void __cdecl MeterOverlayHotkeyTest(AddonHotkeyTest);
+extern "C" bool __cdecl MeterOverlayController(Controller::Settings*,const Controller::Status*,HWND*,bool*,IDirect3DDevice9*);
+extern "C" void __cdecl MeterOverlayInvalidate();
+extern "C" unsigned __cdecl MeterOverlayStatus();
+extern "C" bool __cdecl MeterOverlayEnabled();
+extern "C" bool __cdecl MeterOverlayAddonsOpen();
+extern "C" bool __cdecl MeterOverlayLeaderboardEnabled();
+extern "C" void __cdecl MeterOverlayWorld(bool);
+extern "C" bool __cdecl MeterOverlayHideGold();
+extern "C" unsigned __cdecl MeterOverlayNameplates();
+extern "C" bool __cdecl MeterOverlayTakeReport(MeterReport*);
+extern "C" void __cdecl MeterOverlayReportState(bool,bool,const char*,const ReportContext*);
+extern "C" void __cdecl MeterOverlaySharedHistory(const DungeonHistorySnapshot*);
+extern "C" bool __cdecl MeterOverlayCooldownsEnabled();
+extern "C" void __cdecl MeterOverlayCooldowns(const CooldownFrame*);
+extern "C" bool __cdecl MeterOverlayEffectsEnabled();
+extern "C" void __cdecl MeterOverlayEffects(const EffectFrame*);
+extern "C" bool __cdecl MeterOverlayCharacterSheetEnabled();
+extern "C" void __cdecl MeterOverlayCharacterSheet(const CharacterSheetFrame*);
+extern "C" void __cdecl MeterOverlayCharacterInputTest(AddonInputTest);
+extern "C" int __cdecl MeterOverlayMythicSettings(MythicSettings*,bool,unsigned*,HWND*,CustomSoundStatus,bool);
+extern "C" bool __cdecl MeterOverlayWellSettings(WellSettings*,WellUiAction*,const WellUiState*);
+extern "C" bool __cdecl MeterOverlayCursorEnabled();
+extern "C" bool __cdecl MeterOverlayLowHpEnabled();
+extern "C" void __cdecl MeterOverlayHealth(const LocalHealthFrame*);
+extern "C" bool __cdecl MeterOverlayUnbindInstalled();
+extern "C" bool __cdecl MeterOverlayUnbindEnabled();
+extern "C" void __cdecl MeterOverlayUnbindAvailable(bool);
+extern "C" bool __cdecl MeterOverlayMouseLookInstalled();
+extern "C" void __cdecl MeterOverlayMouseLookAvailable(bool);
+extern "C" bool __cdecl MeterOverlayMouseLook(HWND*,bool*);
+extern "C" void __cdecl MeterOverlayCursorCombat(uint64_t);
+extern "C" bool __cdecl MeterOverlayBankSettings(const BankSortFrame*,BankSortCommand*,bool*);
+extern "C" bool __cdecl MeterOverlayInventorySort(const BankSortFrame*,unsigned*,bool*);
+extern "C" bool __cdecl MeterOverlayMoveSettings(MoveLayoutSettings*,const MoveLayoutFrame*);
+extern "C" void __cdecl MeterOverlayBankInputTest(AddonInputTest);
+extern "C" bool __cdecl MeterOverlayLoadouts(const LoadoutFrame*,LoadoutCommand*,bool*);
+extern "C" void __cdecl MeterOverlayLoadoutInputTest(AddonInputTest);
+
+static WindowsCompat::Once bootstrap;
+static volatile LONG ready = 0;
+static volatile LONG collecting = 0;
+static uintptr_t image = 0;
+static std::recursive_mutex stateGate;
+static NativeMeter meter;
+static CursorCombat cursorCombat;
+static NativeBankSort bankSort;
+static NativeBankSort inventorySort(true);
+static NativeLoadouts loadouts;
+static NativeController controller;
+extern "C" void __cdecl MeterControllerRelease() { controller.Release(); }
+static MouseLookGesture mouseLook;
+static std::recursive_mutex mouseLookGate;
+static volatile LONG mouseLookOn = 0;
+static volatile LONG mouseLookBlockedPress = 0;
+static WindowsCompat::ThreadData<bool> mouseLookReleasing;
+static NativeMoveLayout moveLayout;
+static MeterPacket snapshot{};
+static DungeonHistory history;
+static DungeonHistorySnapshot historySnapshot;
+static uint64_t nextHistory = 0;
+static uint64_t nextRoster = 0;
+static uint64_t nextSnapshot = 0;
+static bool inWorld = false;
+static uintptr_t hiddenMenuFrame = 0;
+static bool uiPrepared = false;
+static NativeCharacterSheet characterSheet;
+static NativeMythicSounds mythicSounds;
+static NativeWishingWell wishingWell;
+static volatile LONG hideGold = 0;
+static volatile LONG unbindLeft = 0;
+static volatile LONG nameplateMask = 0;
+static volatile LONG nameplateGate = 0;
+static NameplateIndex nameplateIndex;
+static PartyReportQueue partyReports;
+static const char* reportStatus = "";
+struct PendingHit { uintptr_t unit, damage; int32_t hp; bool valid; };
+static WindowsCompat::ThreadData<PendingHit> pendingHit;
+
+static bool CopyMemoryChecked(uintptr_t address, void* destination, size_t length) {
+    if (address < 0x10000 || length > 4096 || address > UINTPTR_MAX - length) return false;
+    __try { std::memcpy(destination, reinterpret_cast<const void*>(address), length); return true; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+
+static const char* LookupLabel(const char* path) {
+    const auto first = std::begin(SkillLabels), end = std::end(SkillLabels);
+    const auto found = std::lower_bound(first, end, path, [](const CatalogLabel& row, const char* key) { return std::strcmp(row.path, key) < 0; });
+    return found != end && std::strcmp(found->path, path) == 0 ? found->label : nullptr;
+}
+
+using Hash = WindowsHash;
+
+static std::string FileHash(const std::filesystem::path& path, ALG_ID algorithm, ULONG size) {
+    std::ifstream input(path, std::ios::binary);
+    if (!input) throw std::runtime_error("Required file cannot be read");
+    Hash hash(algorithm);
+    unsigned char block[32768];
+    while (input.read(reinterpret_cast<char*>(block), sizeof(block)) || input.gcount()) hash.Add(block, static_cast<ULONG>(input.gcount()));
+    if (!input.eof()) throw std::runtime_error("File hash read failed");
+    return hash.Finish(size);
+}
+
+static bool VerifyCatalog(const std::filesystem::path& directory) {
+    if (FileHash(directory / L"game.pki", CALG_SHA1, 20) != CatalogPkiSha1) return false;
+    std::ifstream input(directory / L"game.pkg", std::ios::binary);
+    if (!input) return false;
+    Hash hash(WindowsHash::Sha256Algorithm);
+    unsigned char block[32768];
+    for (const auto& range : SkillRanges) {
+        input.seekg(static_cast<std::streamoff>(range.offset));
+        for (uint32_t left = range.length; left;) {
+            const auto size = std::min<uint32_t>(left, sizeof(block));
+            if (!input.read(reinterpret_cast<char*>(block), size)) return false;
+            hash.Add(block, size);
+            left -= size;
+        }
+    }
+    return hash.Finish(32) == CatalogPayloadSha256;
+}
+
+static void Fault(const char* text) {
+    std::lock_guard<std::recursive_mutex> lock(stateGate);
+    meter.Fail(text);
+    cursorCombat.Reset();
+    MeterOverlayCursorCombat(0);
+    bankSort.Reset();
+    inventorySort.Reset();
+    loadouts.Reset();
+    history.Pause(true);
+    InterlockedExchange(&collecting, 0);
+    nextSnapshot = 0;
+}
+
+static bool ExpandMenu(uintptr_t menu, uintptr_t frame, uintptr_t back) {
+    NativeReader reader(image, CopyMemoryChecked, LookupLabel);
+    const auto size = image + 0x27fed0;
+    const auto location = image + 0x27fc60;
+    if (reader.Pointer(reader.Pointer(menu) + 0xac) != size || reader.Pointer(reader.Pointer(frame) + 0xac) != size || reader.Pointer(reader.Pointer(back) + 0xa4) != location) return false;
+    int32_t menuWidth = 0, frameWidth = 0, backX = 0;
+    if (!reader.Read(menu + 0xf8, menuWidth) || !reader.Read(frame + 0xf8, frameWidth) || !reader.Read(back + 0xf0, backX) || menuWidth != 172 || frameWidth != 172 || backX != 15) return false;
+    const int32_t extra = MeterOverlayLeaderboardEnabled() ? 39 : 0;
+    const int32_t dimension[] = {172,279+extra}, point[] = {15,230+extra};
+    using Setter = void (__thiscall*)(void*, const int32_t*, bool);
+    reinterpret_cast<Setter>(size)(reinterpret_cast<void*>(menu), dimension, true);
+    reinterpret_cast<Setter>(size)(reinterpret_cast<void*>(frame), dimension, true);
+    reinterpret_cast<Setter>(location)(reinterpret_cast<void*>(back), point, true);
+    return true;
+}
+
+static bool SetSheetGeometry(uintptr_t node,const NativeCharacterSheet::Geometry& bounds) {
+    NativeReader reader(image,CopyMemoryChecked,LookupLabel);
+    const uintptr_t type = reader.Pointer(node);
+    if ((type != image + 0x4ba0c0 && type != image + 0x449ee8) || reader.Pointer(type + 0xa4) != image + 0x27fc60 || reader.Pointer(type + 0xac) != image + 0x27fed0) return false;
+    using Setter = void (__thiscall*)(void*,const int32_t*,bool);
+    __try {
+        reinterpret_cast<Setter>(image + 0x27fc60)(reinterpret_cast<void*>(node),bounds.data(),false);
+        reinterpret_cast<Setter>(image + 0x27fed0)(reinterpret_cast<void*>(node),bounds.data() + 2,false);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+
+static bool MovePendingLayout(uintptr_t node) {
+    NativeReader reader(image,CopyMemoryChecked,LookupLabel);
+    const auto function = reader.Pointer(reader.Pointer(node)+0xf8);
+    if (function < image+0x1000 || function >= image+0x430000) return false;
+    using Layout = void (__thiscall*)(void*);
+    __try { reinterpret_cast<Layout>(function)(reinterpret_cast<void*>(node)); return true; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+
+static bool SetMoveGeometry(uintptr_t node,const NativeMoveLayout::Geometry& bounds,unsigned panel,bool resized) {
+    using Setter = void (__thiscall*)(void*,const int32_t*,bool);
+    using Layout = void (__thiscall*)(void*);
+    __try {
+        reinterpret_cast<Setter>(image+0x27fc60)(reinterpret_cast<void*>(node),bounds.data(),false);
+        if (resized) {
+            reinterpret_cast<Setter>(image+0x27fed0)(reinterpret_cast<void*>(node),bounds.data()+2,false);
+        }
+        if (panel == unsigned(MovePanel::Minimap)) reinterpret_cast<Layout>(image+0x53630)(reinterpret_cast<void*>(node));
+        else if (resized && panel == unsigned(MovePanel::Chat)) reinterpret_cast<Layout>(image+0x281d50)(reinterpret_cast<void*>(node));
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+
+static MoveProjection moveProjection;
+using LoadProjection = void (__thiscall*)(void*,unsigned,const float*);
+
+extern "C" void __fastcall MoveProjectionLoad(uintptr_t graphics,uintptr_t,unsigned mode,const float* matrix) {
+    const auto original = reinterpret_cast<LoadProjection>(MoveProjectionOriginal);
+    if (mode != 2 || graphics != MoveProjectionTarget) { original(reinterpret_cast<void*>(graphics),mode,matrix); return; }
+    std::array<float,16> source;
+    if (!CopyMemoryChecked(reinterpret_cast<uintptr_t>(matrix),source.data(),sizeof(source))) { original(reinterpret_cast<void*>(graphics),mode,matrix); return; }
+    const auto projected = moveProjection.Apply(source);
+    original(reinterpret_cast<void*>(graphics),mode,projected.data());
+}
+
+static bool WriteMoveClip(uintptr_t address,const std::array<int32_t,4>& clip) {
+    __try { std::memcpy(reinterpret_cast<void*>(address),clip.data(),sizeof(clip)); return true; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+
+static void DrawEffectTimers(const NativeReader& reader) {
+    EffectFrame effects;
+    if (MeterOverlayEffectsEnabled()) NativeCooldowns(reader,image).SampleEffects(effects);
+    MeterOverlayEffects(&effects);
+    const auto graphics = reader.Pointer(image+0x533a44);
+    const auto device = reinterpret_cast<IDirect3DDevice9*>(reader.Pointer(graphics+0x1c));
+    MeterOverlayLayer(device,AddonUiLayer::Effects);
+}
+
+void __fastcall MoveControlDraw(uintptr_t control,uintptr_t function,uintptr_t event) {
+    using Draw = void (__thiscall*)(void*,void*);
+    const auto original = reinterpret_cast<Draw>(function);
+    NativeReader reader(image,CopyMemoryChecked,LookupLabel);
+    NativeMoveLayout::Geometry natural{}, displayed{};
+    std::array<float,16> projection{};
+    std::array<int32_t,4> clip{};
+    std::array<int32_t,2> offset{};
+    const auto graphics = reader.Pointer(event+0x28);
+    const auto matrixEnd = reader.Pointer(graphics+0x1c0), matrixBegin = reader.Pointer(graphics+0x1bc);
+    const auto clipEnd = reader.Pointer(event+0x5c), clipBegin = reader.Pointer(event+0x58);
+    const auto offsetEnd = reader.Pointer(event+0x48), offsetBegin = reader.Pointer(event+0x44);
+    const auto& frame = moveLayout.Frame();
+    const bool valid = !MoveProjectionTarget && frame.width >= 320 && frame.height >= 200 &&
+        matrixEnd >= matrixBegin+64 && matrixEnd-matrixBegin <= 4096 && (matrixEnd-matrixBegin)%64 == 0 &&
+        clipEnd >= clipBegin+16 && clipEnd-clipBegin <= 4096 && (clipEnd-clipBegin)%16 == 0 &&
+        offsetEnd >= offsetBegin+8 && offsetEnd-offsetBegin <= 4096 && (offsetEnd-offsetBegin)%8 == 0 &&
+        reader.Read(matrixEnd-64,projection) && reader.Read(clipEnd-16,clip) && reader.Read(offsetEnd-8,offset);
+    const int panel = valid ? moveLayout.BeginDraw(reader,control,SetMoveGeometry,natural,displayed) : -1;
+    if (panel < 0) { original(reinterpret_cast<void*>(control),reinterpret_cast<void*>(event)); return; }
+    const float sx = float(displayed[2])/natural[2], sy = float(displayed[3])/natural[3];
+    auto logicalClip = clip;
+    for (unsigned i = 0; i < 4; ++i) {
+        const unsigned axis = i%2;
+        const float edge = offset[axis]+(clip[i]-offset[axis])/(axis ? sy : sx);
+        logicalClip[i] = static_cast<int32_t>(i < 2 ? std::ceil(edge) : std::floor(edge));
+    }
+    const auto load = reinterpret_cast<LoadProjection>(MoveProjectionOriginal);
+    moveProjection = MoveProjection::Around(float(offset[0]),float(offset[1]),sx,sy,frame.width,frame.height);
+    const auto adjusted = moveProjection.Apply(projection);
+    const bool clipWritten = WriteMoveClip(clipEnd-16,logicalClip);
+    if (!clipWritten) {
+        SetMoveGeometry(control,displayed,MovePanelCount,true);
+        original(reinterpret_cast<void*>(control),reinterpret_cast<void*>(event));
+        return;
+    }
+    MoveProjectionTarget = graphics;
+    load(reinterpret_cast<void*>(graphics),2,adjusted.data());
+    try {
+        original(reinterpret_cast<void*>(control),reinterpret_cast<void*>(event));
+    } catch (...) {
+        MoveProjectionTarget = 0;
+        load(reinterpret_cast<void*>(graphics),2,projection.data());
+        const auto end = reader.Pointer(event+0x5c), begin = reader.Pointer(event+0x58);
+        if (end >= begin && end-begin == clipEnd-clipBegin) WriteMoveClip(end-16,clip);
+        SetMoveGeometry(control,displayed,MovePanelCount,true);
+        throw;
+    }
+    MoveProjectionTarget = 0;
+    load(reinterpret_cast<void*>(graphics),2,projection.data());
+    const auto end = reader.Pointer(event+0x5c), begin = reader.Pointer(event+0x58);
+    if (end >= begin && end-begin == clipEnd-clipBegin) WriteMoveClip(end-16,clip);
+    moveLayout.EndDraw(reader,image,static_cast<unsigned>(panel),SetMoveGeometry,MovePendingLayout);
+    if (panel == int(MovePanel::Buffs) && reader.InWorld()) DrawEffectTimers(reader);
+}
+
+extern "C" void __fastcall CharacterSheetVisualDraw(uintptr_t visual,uintptr_t,uintptr_t event,SheetQuad area) {
+    using Draw = void (__thiscall*)(void*,void*,SheetQuad);
+    const auto original = reinterpret_cast<Draw>(CharacterSheetVisualOriginal);
+    NativeReader reader(image,CopyMemoryChecked,LookupLabel);
+    if (!characterSheet.DrawVisual(reader,image,visual,event,area,original)) original(reinterpret_cast<void*>(visual),reinterpret_cast<void*>(event),area);
+}
+
+static bool SafeSendParty(uintptr_t chat,const char* text) {
+    __try { return SendNativePartyLine(image + 0x1ffca0,chat,text); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+
+static void UpdateReports(const NativeReader& reader,bool shown,uint64_t now) {
+    std::lock_guard<std::recursive_mutex> lock(stateGate);
+    ReportContext destination;
+    const bool available = shown && reader.PartyChat(destination);
+    MeterReport request;
+    if (MeterOverlayTakeReport(&request)) {
+        if (!available) reportStatus = "Join a party to send a report.";
+        else if (!(request.recipient == destination)) reportStatus = "Report cancelled: party changed before submission.";
+        else if (!partyReports.Start(request,destination,now)) reportStatus = "Please wait before sending another report.";
+        else reportStatus = "Sending to party /g...";
+    }
+    if (partyReports.Pending()) {
+        if (!available) { partyReports.Cancel(); reportStatus = "Report cancelled: party or connection unavailable."; }
+        else {
+            const char* line = partyReports.Next(destination,now);
+            if (!partyReports.Pending()) reportStatus = "Report cancelled: party or character changed.";
+            else if (line) {
+                const bool sent = SafeSendParty(destination.identity[4],line);
+                partyReports.Sent(sent,now);
+                if (!sent) reportStatus = "Report stopped: chat submission failed.";
+                else if (!partyReports.Pending()) reportStatus = "Report submitted to party /g.";
+            }
+        }
+    }
+    MeterOverlayReportState(available,partyReports.Pending() || partyReports.CoolingDown(now),reportStatus,&destination);
+}
+
+extern "C" uintptr_t __cdecl LootLabelDispatch(const HookRegisters* registers) {
+    const DWORD error = GetLastError();
+    uintptr_t next = reinterpret_cast<uintptr_t>(LootLabelOriginal);
+    if (InterlockedCompareExchange(&ready,0,0) && InterlockedCompareExchange(&hideGold,0,0)) {
+        NativeReader reader(image,CopyMemoryChecked,LookupLabel);
+        if (reader.IsGold(registers->esi)) next = image + 0x86f17;
+    }
+    SetLastError(error);
+    return next;
+}
+
+extern "C" uintptr_t __cdecl LeftClickFallbackDispatch(const HookRegisters* registers) {
+    const DWORD error = GetLastError();
+    const NativeReader reader(image,CopyMemoryChecked,LookupLabel);
+    const bool enabled = InterlockedCompareExchange(&ready,0,0) && InterlockedCompareExchange(&unbindLeft,0,0);
+    const auto next = LeftClickFallbackTarget(reader,image,registers->esi,enabled,reinterpret_cast<uintptr_t>(LeftClickFallbackOriginal));
+    SetLastError(error);
+    return next;
+}
+
+static uintptr_t VisibleControlAt(uintptr_t root,const int32_t* point) {
+    using HitTest = uintptr_t (__thiscall*)(void*,const int32_t*,bool);
+    __try { return reinterpret_cast<HitTest>(image + 0x281540)(reinterpret_cast<void*>(root),point,true); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+}
+
+static bool OverlayInput(float x,float y,bool menuLayer) {
+    NativeReader reader(image,CopyMemoryChecked,LookupLabel);
+    if (!std::isfinite(x) || !std::isfinite(y) || x < 0 || y < 0 || x > 1 || y > 1 || !reader.InWorld()) return false;
+    const uintptr_t root = reader.Pointer(image + 0x533e20);
+    int32_t width = 0,height = 0;
+    if (!root || !reader.Read(root + 0xf8,width) || !reader.Read(root + 0xfc,height) || width < 1 || height < 1 || width > 16384 || height > 16384) return false;
+    const int32_t point[] = {static_cast<int32_t>(x * width),static_cast<int32_t>(y * height)};
+    return reader.OverlayInput(VisibleControlAt(root,point),menuLayer);
+}
+
+static bool MouseLookForeground(HWND window) {
+    DWORD process = 0;
+    return window && IsWindow(window) && !IsIconic(window) && GetForegroundWindow() == window &&
+        GetWindowThreadProcessId(window,&process) == GetCurrentThreadId() && process == GetCurrentProcessId();
+}
+
+static bool MouseLookWorldPoint(HWND window) {
+    POINT point{};
+    RECT area{};
+    if (!GetCursorPos(&point) || GetAncestor(WindowFromPoint(point),GA_ROOT) != window ||
+        !ScreenToClient(window,&point) || !GetClientRect(window,&area) || !PtInRect(&area,point)) return false;
+    return OverlayInput(float(point.x) / float(area.right - area.left),float(point.y) / float(area.bottom - area.top),false);
+}
+
+static void MouseLookRestore(const MouseLookGesture& previous) {
+    bool* releasing=mouseLookReleasing.Get();
+    if (!previous.Active() || !releasing || *releasing) return;
+    const NativeReader reader(image,CopyMemoryChecked,LookupLabel);
+    const auto context = MouseLookContext::Read(reader,image);
+    if (!previous.Owns(context.handler,context.mouse)) return;
+    *releasing = true;
+    __try { MouseLookInvokeSelect(image + 0x2a9f0,context.handler,context.mouse); }
+    __except (EXCEPTION_EXECUTE_HANDLER) {}
+    *releasing = false;
+}
+
+extern "C" void __cdecl MeterMouseLookRelease() {
+    MouseLookGesture previous;
+    {
+        std::lock_guard<std::recursive_mutex> lock(mouseLookGate);
+        previous = mouseLook;
+        mouseLook.Reset();
+    }
+    MouseLookRestore(previous);
+}
+
+extern "C" void __cdecl MeterMouseLookButton(bool down,bool consumed) {
+    if (!down) { InterlockedExchange(&mouseLookBlockedPress,0); return; }
+    HWND window = nullptr;
+    bool blocked = true;
+    bool allowed = false;
+    if (!consumed && InterlockedCompareExchange(&mouseLookOn,0,0) && MeterOverlayMouseLook(&window,&blocked) && !blocked && MouseLookForeground(window)) {
+        const NativeReader reader(image,CopyMemoryChecked,LookupLabel);
+        allowed = MouseLookContext::Read(reader,image).available && MouseLookWorldPoint(window);
+    }
+    InterlockedExchange(&mouseLookBlockedPress,allowed ? 0 : 1);
+    if (!allowed) MeterMouseLookRelease();
+}
+
+static void ServiceMouseLook(const NativeReader& reader) {
+    HWND window = nullptr;
+    bool blocked = true;
+    const bool enabled = MeterOverlayMouseLook(&window,&blocked);
+    const bool wasEnabled = InterlockedExchange(&mouseLookOn,enabled ? 1 : 0) != 0;
+    if (!enabled) { if (wasEnabled) MeterMouseLookRelease(); return; }
+    if (InterlockedCompareExchange(&mouseLookBlockedPress,0,0) && !(GetAsyncKeyState(GetSystemMetrics(SM_SWAPBUTTON) ? VK_LBUTTON : VK_RBUTTON) & 0x8000))
+        InterlockedExchange(&mouseLookBlockedPress,0);
+    const auto context = MouseLookContext::Read(reader,image);
+    const bool available = context.available && !blocked && !InterlockedCompareExchange(&mouseLookBlockedPress,0,0) && MouseLookForeground(window);
+    const bool worldPoint = available && MouseLookWorldPoint(window);
+    MouseLookGesture previous;
+    bool released = false;
+    {
+        std::lock_guard<std::recursive_mutex> lock(mouseLookGate);
+        previous = mouseLook;
+        released = !mouseLook.Update(context.handler,context.mouse,enabled,available,context.right,worldPoint,false) && previous.Active();
+    }
+    if (released) MouseLookRestore(previous);
+}
+
+extern "C" uintptr_t __cdecl MouseLookSelectDispatch(const HookRegisters* registers) {
+    const DWORD error = GetLastError();
+    uintptr_t next = MouseLookSelectContinue;
+    const bool* releasing=mouseLookReleasing.Get();
+    if (registers && releasing && !*releasing && InterlockedCompareExchange(&ready,0,0) && InterlockedCompareExchange(&mouseLookOn,0,0)) {
+        HWND window = nullptr;
+        bool blocked = true;
+        const bool enabled = MeterOverlayMouseLook(&window,&blocked);
+        const NativeReader reader(image,CopyMemoryChecked,LookupLabel);
+        const auto context = MouseLookContext::Read(reader,image);
+        if (registers->esi == context.handler && registers->edi == context.mouse) {
+            const bool available = context.available && !blocked && !InterlockedCompareExchange(&mouseLookBlockedPress,0,0) && MouseLookForeground(window);
+            const bool worldPoint = available && MouseLookWorldPoint(window);
+            std::lock_guard<std::recursive_mutex> lock(mouseLookGate);
+            if (mouseLook.Update(context.handler,context.mouse,enabled,available,context.right,worldPoint,true)) next = image + 0x2aa67;
+        }
+    }
+    SetLastError(error);
+    return next;
+}
+
+extern "C" uintptr_t __cdecl MouseLookClickDispatch(const HookRegisters* registers) {
+    const DWORD error = GetLastError();
+    uintptr_t next = reinterpret_cast<uintptr_t>(MouseLookClickOriginal);
+    if (registers && InterlockedCompareExchange(&ready,0,0) && InterlockedCompareExchange(&mouseLookOn,0,0)) {
+        const NativeReader reader(image,CopyMemoryChecked,LookupLabel);
+        std::lock_guard<std::recursive_mutex> lock(mouseLookGate);
+        if (MouseLookBlocksClick(reader,mouseLook,registers->esp + 8,registers->eax)) next = reinterpret_cast<uintptr_t>(MouseLookSkipClick);
+    }
+    SetLastError(error);
+    return next;
+}
+
+extern "C" uintptr_t __cdecl MouseLookRightDispatch(const HookRegisters* registers) {
+    const DWORD error = GetLastError();
+    uintptr_t next = reinterpret_cast<uintptr_t>(MouseLookRightOriginal);
+    if (registers && InterlockedCompareExchange(&ready,0,0) && InterlockedCompareExchange(&mouseLookOn,0,0)) {
+        const NativeReader reader(image,CopyMemoryChecked,LookupLabel);
+        std::lock_guard<std::recursive_mutex> lock(mouseLookGate);
+        if (MouseLookMasksRight(reader,mouseLook,image,registers->esp + 8,registers->esi,registers->ecx)) next = reinterpret_cast<uintptr_t>(MouseLookRightReleased);
+    }
+    SetLastError(error);
+    return next;
+}
+
+static AddonHotkeyState OverlayHotkey(unsigned key,unsigned modifiers,bool activation) {
+    NativeReader reader(image,CopyMemoryChecked,LookupLabel);
+    return NativeHotkeys(reader,image).Check(key,modifiers,activation);
+}
+
+static bool PanelInput(float x,float y,unsigned offset,bool background,bool closeOnly = false) {
+    NativeReader reader(image,CopyMemoryChecked,LookupLabel);
+    if (!std::isfinite(x) || !std::isfinite(y) || x < 0 || y < 0 || x > 1 || y > 1 || !reader.InWorld()) return false;
+    const uintptr_t ui = reader.Pointer(image + 0x5314b0), root = reader.Pointer(image + 0x533e20), sheet = reader.Pointer(ui + offset);
+    int32_t width = 0, height = 0;
+    if (!root || !sheet || reader.Pointer(ui+0x180) || !reader.Read(root + 0xf8,width) || !reader.Read(root + 0xfc,height) || width < 1 || height < 1 || width > 16384 || height > 16384) return false;
+    const int32_t point[] = {static_cast<int32_t>(x * width),static_cast<int32_t>(y * height)};
+    uintptr_t node = VisibleControlAt(root,point);
+    if (closeOnly && offset == 0x23c) return NativeBankSort::Navigation(reader,image,node);
+    if (background && !closeOnly && reader.OverlayInput(node,false)) return true;
+    bool close = false;
+    for (unsigned depth = 0; node && depth < 24; ++depth) {
+        if (node == sheet) return !closeOnly || close;
+        if (closeOnly) { const auto name = reader.String(node+0x10,96); close = close || name == "Close" || name == "Cancel" || name == "CloseBox"; }
+        node = reader.Pointer(node + 0x14);
+    }
+    return false;
+}
+
+static bool CharacterInput(float x,float y,bool) { return PanelInput(x,y,0x270,false); }
+static bool BankInput(float x,float y,bool closeOnly) { return PanelInput(x,y,0x23c,true,closeOnly); }
+static bool LoadoutInput(float x,float y,bool closeOnly) { return PanelInput(x,y,0x230,true,closeOnly); }
+
+static void EnablePlayerPlate(uintptr_t stack) {
+    __try {
+        auto* options = reinterpret_cast<uint32_t*>(stack + 0x30);
+        options[0] = options[1] = 0x01010101;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+}
+
+extern "C" uintptr_t __cdecl NameplateDispatch(unsigned kind,const HookRegisters* registers) {
+    const DWORD error = GetLastError();
+    void* originals[] = {NameplateOptionsOriginal,NameplateCreateOriginal,NameplateBarsOriginal,NameplateNameOriginal,NameplatePosseOriginal,NameplateRetireOriginal};
+    uintptr_t next = kind < std::size(originals) ? reinterpret_cast<uintptr_t>(originals[kind]) : 0;
+    const unsigned mask = static_cast<unsigned>(InterlockedCompareExchange(&nameplateMask,0,0));
+    if (registers && InterlockedCompareExchange(&ready,0,0) && InterlockedCompareExchange(&nameplateGate,1,0)==0) {
+        NativeReader reader(image,CopyMemoryChecked,LookupLabel);
+        const uintptr_t stack = registers->esp + 8;
+        if (kind == 5) nameplateIndex.Forget(registers->edi);
+        else if (kind == 1) {
+            const auto unit = reader.Pointer(stack + 8);
+            nameplateIndex.Remember(registers->eax,mask ? NativeNameplates(reader,image).Classify(unit) : NameplateKind::Other);
+        } else if (mask & 1u) {
+            if (kind == 0) {
+                const auto type = NativeNameplates(reader,image).Classify(registers->ebx);
+                nameplateIndex.Remember(reader.Pointer(registers->edi + 0xf4),type);
+                if (type == NameplateKind::Player || type == NameplateKind::Self) EnablePlayerPlate(stack);
+            } else if (kind >= 2 && kind <= 4) {
+                const auto part = static_cast<NameplatePart>(kind - 2);
+                if (!NameplateVisible(mask,nameplateIndex.Find(registers->esi),part)) {
+                    const uintptr_t targets[] = {0x288e94,0x288ecc,0x288f04};
+                    next = image + targets[kind - 2];
+                }
+            }
+        }
+        InterlockedExchange(&nameplateGate,0);
+    }
+    SetLastError(error);
+    return next;
+}
+
+static void RefreshUi(const NativeReader& reader) {
+    const uint64_t now = WindowsCompat::Milliseconds();
+    Controller::Settings controllerSettings;
+    HWND controllerWindow=nullptr;
+    bool controllerBlocked=false;
+    const auto controllerGraphics=reader.Pointer(image+0x533a44);
+    const auto controllerDevice=reinterpret_cast<IDirect3DDevice9*>(reader.Pointer(controllerGraphics+0x1c));
+    if (MeterOverlayController(&controllerSettings,nullptr,&controllerWindow,&controllerBlocked,controllerDevice)) {
+        controller.Service(reader,image,controllerSettings,controllerWindow,controllerBlocked,now);
+        MeterOverlayController(nullptr,&controller.Status(),nullptr,nullptr,nullptr);
+    } else controller.Release();
+    const uintptr_t ui = reader.Pointer(image + 0x5314b0);
+    const bool shown = reader.InWorld();
+    MoveLayoutSettings layoutSettings;
+    const bool moveInstalled = MeterOverlayMoveSettings(&layoutSettings,nullptr);
+    moveLayout.Prepare(reader,image,layoutSettings,moveInstalled,shown);
+    MoveUiFrameTarget = ui;
+    static_assert(MoveControlTargetCount == NativeMoveLayout::DrawTargetCount);
+    for (unsigned i = 0; i < MoveControlTargetCount; ++i) MoveControlTargets[i] = moveLayout.DrawTarget(i);
+    const unsigned actions = MeterOverlayStatus();
+    const bool enabled = MeterOverlayEnabled();
+    const bool cursorEnabled = MeterOverlayCursorEnabled();
+    BankSortCommand bankAction;
+    bool bankFocused = false;
+    const bool bankEnabled = MeterOverlayBankSettings(nullptr,&bankAction,&bankFocused);
+    if ((loadouts.Frame().busy || inventorySort.Frame().busy) && bankAction.action!=3) bankAction.action=0;
+    bankSort.Service(reader,image,bankEnabled,bankAction.action,bankFocused,now,bankAction.pages);
+    MeterOverlayBankSettings(&bankSort.Frame(),nullptr,nullptr);
+    unsigned inventoryAction=0;
+    bool inventoryFocused=false;
+    const bool inventoryEnabled=MeterOverlayInventorySort(nullptr,&inventoryAction,&inventoryFocused);
+    if ((loadouts.Frame().busy || bankSort.Frame().busy) && inventoryAction!=3) inventoryAction=0;
+    inventorySort.Service(reader,image,inventoryEnabled,inventoryAction,inventoryFocused,now);
+    MeterOverlayInventorySort(&inventorySort.Frame(),nullptr,nullptr);
+    LoadoutCommand loadoutAction;
+    bool loadoutFocused=false;
+    const bool loadoutEnabled=MeterOverlayLoadouts(nullptr,&loadoutAction,&loadoutFocused);
+    loadouts.Service(reader,image,loadoutEnabled,loadoutAction,loadoutFocused,bankSort.Frame().busy || inventorySort.Frame().busy,now);
+    if (loadouts.TakeBankSortRequest() && bankEnabled && bankFocused && loadoutFocused && !inventorySort.Frame().busy && !bankAction.pages.empty()) {
+        bankSort.Service(reader,image,true,2,true,now,bankAction.pages);
+        MeterOverlayBankSettings(&bankSort.Frame(),nullptr,nullptr);
+    }
+    MeterOverlayLoadouts(&loadouts.Frame(),nullptr,nullptr);
+    MythicSettings soundSettings;
+    unsigned previewVolume = 100;
+    HWND browse = nullptr;
+    bool soundFailed = false, soundImported = false;
+    CustomSoundStatus soundStatus;
+    {
+        std::lock_guard<std::recursive_mutex> lock(stateGate);
+        soundFailed = mythicSounds.Failed(); soundImported = mythicSounds.TakeCustomImport(); soundStatus = mythicSounds.CustomStatus();
+    }
+    const int preview = MeterOverlayMythicSettings(&soundSettings,soundFailed,&previewVolume,&browse,soundStatus,soundImported);
+    WellSettings wellSettings;
+    WellUiAction wellAction;
+    WellUiState wellState;
+    const uint64_t utc = NativeWishingWell::UtcNow();
+    { std::lock_guard<std::recursive_mutex> lock(stateGate); wellState = wishingWell.State(utc); }
+    const bool wellInstalled = MeterOverlayWellSettings(&wellSettings,&wellAction,&wellState);
+    {
+        std::lock_guard<std::recursive_mutex> lock(stateGate);
+        if (browse) mythicSounds.Browse(browse);
+        mythicSounds.Service(reader,image,soundSettings,preview,shown,now,previewVolume);
+        wishingWell.Service(reader,image,wellSettings,wellAction,wellInstalled,shown,now,utc);
+    }
+    InterlockedExchange(&hideGold,MeterOverlayHideGold() ? 1 : 0);
+    InterlockedExchange(&nameplateMask,static_cast<LONG>(MeterOverlayNameplates()));
+    UpdateReports(reader,shown,now);
+    bool updated = false;
+    {
+        std::lock_guard<std::recursive_mutex> lock(stateGate);
+        if (actions & 1) { meter.Reset(); nextSnapshot = nextRoster = 0; }
+        if (actions & 2) { history.Finish("Finished manually",now); nextHistory=0; }
+        meter.Enable(enabled);
+        if (!enabled) history.Pause(true);
+        if (!shown && inWorld) { meter.Zone(); history.LeaveZone(); cursorCombat.Reset(); nextRoster = 0; }
+        if (!cursorEnabled) cursorCombat.Reset();
+        inWorld = shown;
+        if (shown && now >= nextRoster) {
+            uint32_t self = 0;
+            std::vector<MeterMember> members;
+            const bool rosterReady = reader.Party(self, members) && meter.Roster(self, members);
+            cursorCombat.Player(cursorEnabled && rosterReady ? self : 0);
+            if (!rosterReady) meter.Zone();
+            std::string zoneKey;
+            uint32_t seed = 0;
+            if (rosterReady && meter.Enabled() && reader.ZoneIdentity(zoneKey,seed)) {
+                const auto end=std::end(DungeonZones);
+                const auto zone=std::lower_bound(std::begin(DungeonZones),end,zoneKey,[](const CatalogZone& item,const std::string& key) { return item.key<key; });
+                if (zone!=end && zoneKey==zone->key) history.Context(zoneKey,zone->family,zone->title,seed,self,members,now);
+                else history.Pause(true);
+            } else history.Pause();
+            nextRoster = now + (rosterReady ? 500 : 100);
+        }
+        if (cursorEnabled && shown && !reader.LocalAvatarAlive()) cursorCombat.Reset();
+        InterlockedExchange(&collecting, shown && meter.HasRoster() && (meter.Enabled() || cursorEnabled) ? 1 : 0);
+        MeterOverlayCursorCombat(cursorEnabled ? cursorCombat.Until() : 0);
+        if (now >= nextSnapshot) {
+            meter.Snapshot(snapshot, now);
+            updated = true;
+            nextSnapshot = now + 200;
+        }
+        history.Save(now);
+        if (now >= nextHistory) { history.Share(historySnapshot,now); MeterOverlaySharedHistory(&historySnapshot); nextHistory=now+1000; }
+    }
+    MeterOverlayWorld(shown);
+    ServiceMouseLook(reader);
+    const auto health = shown && MeterOverlayLowHpEnabled() ? reader.LocalHealth(now) : LocalHealthFrame{};
+    MeterOverlayHealth(&health);
+    InterlockedExchange(&unbindLeft,MeterOverlayUnbindEnabled() ? 1 : 0);
+    characterSheet.Prepare(reader,image,MeterOverlayCharacterSheetEnabled(),shown,now,SetSheetGeometry);
+    InterlockedExchange(reinterpret_cast<volatile LONG*>(&CharacterSheetVisualTarget),static_cast<LONG>(characterSheet.VisualTarget()));
+    int32_t uiWidth = 0, uiHeight = 0;
+    if (shown && reader.Read(ui + 0xf8, uiWidth) && reader.Read(ui + 0xfc, uiHeight)) MeterOverlayUiSize(uiWidth, uiHeight);
+    else MeterOverlayUiSize(0, 0);
+    CooldownFrame cooldowns;
+    if (shown && MeterOverlayCooldownsEnabled()) NativeCooldowns(reader,image).Sample(cooldowns);
+    MeterOverlayCooldowns(&cooldowns);
+    if (updated) MeterOverlayUpdate(&snapshot, sizeof(snapshot));
+    std::array<float, 4> rect{};
+    if (shown) reader.Menu(rect, ExpandMenu, MeterOverlayLeaderboardEnabled() ? 2 : 1);
+    MeterOverlayMenu(rect[0], rect[1], rect[2], rect[3]);
+}
+
+static void SyncMenuFrame(const NativeReader& reader) {
+    const uintptr_t frame = reader.MenuFrame();
+    uint32_t frameFlags = 0;
+    const bool frameVisible = !MeterOverlayAddonsOpen();
+    if (hiddenMenuFrame != frame) hiddenMenuFrame = 0;
+    if (frame && reader.Read(frame + 0xb4, frameFlags) && (!frameVisible || hiddenMenuFrame == frame)) {
+        using Visibility = void (__thiscall*)(void*, bool);
+        if (((frameFlags & 8) != 0) != frameVisible) {
+            reinterpret_cast<Visibility>(image + 0x280100)(reinterpret_cast<void*>(frame), frameVisible);
+            hiddenMenuFrame = frameVisible ? 0 : frame;
+        } else if (frameVisible) hiddenMenuFrame = 0;
+    }
+}
+
+static void Observe(unsigned kind, const HookRegisters& registers) {
+    NativeReader reader(image, CopyMemoryChecked, LookupLabel);
+    if (kind >= 10 && kind <= 12) {
+        std::lock_guard<std::recursive_mutex> lock(stateGate);
+        if (kind == 10) wishingWell.Accepted(reader,image,registers.ebp,registers.esi,NativeWishingWell::UtcNow());
+        else if (kind == 11) wishingWell.Finalized(reader,image,registers.edi,registers.eax,NativeWishingWell::UtcNow());
+        else wishingWell.Logout();
+        return;
+    }
+    if (kind == 8 || kind == 9) {
+        std::lock_guard<std::recursive_mutex> lock(stateGate);
+        if (kind == 8) mythicSounds.Drop(reader,image,registers.ebx,WindowsCompat::Milliseconds());
+        else mythicSounds.InventoryDrop(reader,image,registers.esi,WindowsCompat::Milliseconds());
+        return;
+    }
+    if (kind == 0) {
+        auto* local=pendingHit.Get();if(!local){Fault("Measurement stopped: thread data unavailable");return;}auto& pending=*local;
+        pending = {};
+        if (!InterlockedCompareExchange(&collecting, 0, 0)) return;
+        pending.unit = registers.ebx;
+        pending.damage = registers.ebp;
+        pending.valid = reader.Read(pending.unit + 0x2f0, pending.hp);
+        if (!pending.valid) Fault("Measurement stopped: HP sample unavailable");
+        return;
+    }
+    if (kind == 1) {
+        auto* local=pendingHit.Get();if(!local){Fault("Measurement stopped: thread data unavailable");return;}auto& pending=*local;
+        const auto before = pending;
+        pending = {};
+        if (!before.valid || !InterlockedCompareExchange(&collecting, 0, 0)) return;
+        if (before.unit != registers.ebx || before.damage != registers.ebp) { Fault("Measurement stopped: unmatched HP commit"); return; }
+        MeterHit hit;
+        hit.before = before.hp;
+        if (!reader.Read(before.unit + 0x2f0, hit.after) || !reader.Read(before.damage + 0x38, hit.amount) || !reader.Read(before.damage + 0x40, hit.element) || !reader.Read(before.damage + 0x3e, hit.damageClass)) { Fault("Measurement stopped: damage unavailable"); return; }
+        const auto source = reader.Pointer(before.damage + 0x2c);
+        if (source == before.unit) return;
+        hit.sourceId = reader.OwnerId(source);
+        hit.targetId = reader.PlayerId(before.unit);
+        if (!hit.targetId) hit.targetPetOwnerId = reader.OwnerId(before.unit);
+        if (!hit.sourceId && !hit.targetId && !hit.targetPetOwnerId) return;
+        hit.pet = hit.sourceId && !reader.PlayerId(source);
+        std::lock_guard<std::recursive_mutex> lock(stateGate);
+        const uint64_t now = WindowsCompat::Milliseconds();
+        if (MeterOverlayCursorEnabled()) {
+            cursorCombat.Hit(hit.sourceId,hit.targetId,hit.targetPetOwnerId,hit.before,hit.after,now);
+            MeterOverlayCursorCombat(cursorCombat.Until());
+        }
+        if (!meter.Enabled()) return;
+        uint8_t damageFlags = 0;
+        hit.criticalKnown = reader.Read(before.damage + 0x41,damageFlags);
+        hit.critical = hit.criticalKnown && (damageFlags & 1);
+        const uintptr_t producer = reader.Pointer(before.damage + 0x30);
+        hit.criticalSource = reader.CriticalSource(producer,hit.damageClass);
+        const auto attacker=reader.Identity(source), target=reader.Identity(before.unit);
+        hit.sourceKey=attacker.first; hit.sourceName=attacker.second;
+        hit.targetKey=target.first; hit.targetName=target.second;
+        const auto skill = reader.Skill(reader.Pointer(before.damage + 0x30));
+        hit.skillKey = skill.first;
+        hit.skillName = skill.second;
+        meter.Hit(hit, now);
+        history.Hit(hit, now);
+        return;
+    }
+    if (kind == 2) {
+        controller.Release();
+        std::lock_guard<std::recursive_mutex> lock(stateGate);
+        mythicSounds.Reset(reader,image);
+        cursorCombat.Reset();
+        MeterOverlayCursorCombat(0);
+        bankSort.Reset();
+        inventorySort.Reset();
+        loadouts.Reset();
+        meter.Zone();
+        history.LeaveZone();
+        inWorld = false;
+        uiPrepared = false;
+        nextRoster = nextSnapshot = 0;
+        pendingHit.ReleaseCurrent();
+        InterlockedExchange(&collecting, 0);
+        reportStatus = partyReports.Pending() ? "Report cancelled by map transition." : "";
+        partyReports.Cancel();
+        MeterOverlayWorld(false);
+        return;
+    }
+    if (kind == 3) {
+        if (!(registers.eax & 255)) Fault("Client reported a sync error; reset meter after recovery");
+        return;
+    }
+    if (kind == 5) { MeterOverlayInvalidate(); return; }
+    if (kind == 13) { moveLayout.BeginFrame(reader,image,registers.ecx,SetMoveGeometry); return; }
+    if (kind == 4) {
+        if (!uiPrepared || !reader.InWorld()) RefreshUi(reader);
+        MeterOverlayMoveSettings(nullptr,&moveLayout.Frame());
+        MeterOverlayEndFrame();
+        SyncMenuFrame(reader);
+        uiPrepared = false;
+        return;
+    }
+    const uintptr_t ui = reader.Pointer(image + 0x5314b0);
+    if (!ui) return;
+    if (kind == 6) {
+        const uintptr_t control = reader.Pointer(registers.esp + 8);
+        if (control == ui) {
+            RefreshUi(reader);
+            uiPrepared = true;
+            moveLayout.BeforeChildren(reader,image,control,SetMoveGeometry,MovePendingLayout);
+            return;
+        }
+        if (uiPrepared) moveLayout.BeforeChildren(reader,image,control,SetMoveGeometry,MovePendingLayout);
+        if (!uiPrepared || !control || control != reader.UiForeground()) return;
+        const uintptr_t graphics = reader.Pointer(image + 0x533a44);
+        const auto device = reinterpret_cast<IDirect3DDevice9*>(reader.Pointer(graphics + 0x1c));
+        MeterOverlayLayer(device,AddonUiLayer::Meter);
+    } else if (kind == 7 && uiPrepared) {
+        AddonUiLayer layer;
+        if (registers.edi == reader.Pointer(ui + 0x22c)) layer = AddonUiLayer::Hotbar;
+        else if (registers.edi == reader.Pointer(ui + 0x26c)) layer = AddonUiLayer::Effects;
+        else if (registers.edi == reader.Pointer(ui + 0x1dc)) layer = AddonUiLayer::Menu;
+        else if (registers.edi == reader.Pointer(ui + 0x270)) layer = AddonUiLayer::CharacterSheet;
+        else if (registers.edi == reader.Pointer(ui + 0x23c)) layer = AddonUiLayer::Bank;
+        else if (registers.edi == reader.Pointer(ui + 0x230)) layer = AddonUiLayer::Inventory;
+        else return;
+        if (!reader.InWorld()) return;
+        if (layer == AddonUiLayer::CharacterSheet) {
+            const auto frame = MeterOverlayCharacterSheetEnabled() ? characterSheet.Frame(reader,image,WindowsCompat::Milliseconds()) : CharacterSheetFrame{};
+            MeterOverlayCharacterSheet(&frame);
+        }
+        if (layer == AddonUiLayer::Effects) {
+            if (!MoveProjectionTarget) DrawEffectTimers(reader);
+            return;
+        }
+        const uintptr_t graphics = reader.Pointer(image + 0x533a44);
+        const auto device = reinterpret_cast<IDirect3DDevice9*>(reader.Pointer(graphics + 0x1c));
+        MeterOverlayLayer(device,layer);
+    }
+}
+
+extern "C" void __cdecl MeterDispatch(unsigned kind, const HookRegisters* registers) {
+    const DWORD error = GetLastError();
+    if (InterlockedCompareExchange(&ready, 0, 0)) {
+        try { Observe(kind, *registers); }
+        catch (...) { try { Fault("Measurement stopped: observer failure"); } catch (...) { InterlockedExchange(&collecting, 0); } }
+    }
+    SetLastError(error);
+}
+
+struct HookSpec { uintptr_t rva; const char* bytes; void* handler; void** original; };
+static HookSpec hooks[] = {
+    {0x281187, "558bceffd08b4f082b4f04c1f904", reinterpret_cast<void*>(MoveControlHook), &MoveControlOriginal},
+    {0x2e1520, "8bc10fb74c240483f911", reinterpret_cast<void*>(MoveProjectionHook), &MoveProjectionOriginal},
+    {0x281000, "6aff68387c7c0064a100000000506489250000000083ec10", reinterpret_cast<void*>(MeterUiBegin), &MeterUiBeginOriginal},
+    {0x280f00, "558bec83e4f883ec1c5356578bf98b87b4000000c1e806a8", reinterpret_cast<void*>(MoveUiFrameHook), &MoveUiFrameOriginal},
+    {0x280fc5, "8b4b342b4b30c1f90285c976168b43348bd02b5330f7c2fc", reinterpret_cast<void*>(MeterUiControl), &MeterUiControlOriginal},
+    {0x10bfd8, "8b83f00200008b4d383bc1760a2bc18983f0020000", reinterpret_cast<void*>(MeterBefore), &MeterBeforeOriginal},
+    {0x10bffc, "8a453e3c040f84080100008b8b34010000", reinterpret_cast<void*>(MeterCommit), &MeterCommitOriginal},
+    {0x1fc510, "6aff64a10000000068589d7d005064892500000000", reinterpret_cast<void*>(MeterLoading), &MeterLoadingOriginal},
+    {0x1ddafa, "8b8c243c0800005e5d64890d000000005b", reinterpret_cast<void*>(MeterValidate), &MeterValidateOriginal},
+    {0x2e113a, "8b461c8b088b51446a006a006a006a0050ffd2", reinterpret_cast<void*>(MeterPresent), &MeterPresentOriginal},
+    {0x2e4060, "515355568bf033db57389e29050000", reinterpret_cast<void*>(MeterResources), &MeterResourcesOriginal},
+    {0x86bf0, "8b8bfc0000008bbbf80000008b54241083ec088bc4c70096", reinterpret_cast<void*>(LootLabelHook), &LootLabelOriginal},
+    {0xbb22a, "8b4424308844241188642410c64424120184c0750484e474", reinterpret_cast<void*>(NameplateOptionsHook), &NameplateOptionsOriginal},
+    {0x288a81, "8b74242c890685c0740c83c004ba01000000f00fc110c744", reinterpret_cast<void*>(NameplateCreateHook), &NameplateCreateOriginal},
+    {0x288e5b, "8d4c241c51518bc48964243c893085f6740c8d5604b80100", reinterpret_cast<void*>(NameplateBarsHook), &NameplateBarsOriginal},
+    {0x288e94, "8d4c241c51518bc48964243c893085f6740c8d5604b80100", reinterpret_cast<void*>(NameplateNameHook), &NameplateNameOriginal},
+    {0x288ecc, "8d44241c50518bc48964243c893085f6740c8d4e04ba0100", reinterpret_cast<void*>(NameplatePosseHook), &NameplatePosseOriginal},
+    {0x2888e0, "895c24248d47048bcbf00fc108750a8b178b026a018bcfff", reinterpret_cast<void*>(NameplateRetireHook), &NameplateRetireOriginal},
+    {0x28f270, "558bec83e4f864a1000000006aff6880077d00508b4508", reinterpret_cast<void*>(CharacterSheetVisualHook), &CharacterSheetVisualOriginal},
+    {0x18ac2e, "c68301010000016a01e8a4f5ffff", reinterpret_cast<void*>(MythicDropHook), &MythicDropOriginal},
+    {0x18d7cc, "8bc5c644242402", reinterpret_cast<void*>(MythicInventoryHook), &MythicInventoryOriginal},
+    {0x1c3901, "8b46685068f8c304008d442420508bfd", reinterpret_cast<void*>(WellAcceptedHook), &WellAcceptedOriginal},
+    {0x1c3c7f, "8b108bc88b4258ffd05368ffc30400", reinterpret_cast<void*>(WellFinalizedHook), &WellFinalizedOriginal},
+    {0x9a40, "6aff6838bb7d0064a1000000005064892500", reinterpret_cast<void*>(WellLoginHook), &WellLoginOriginal},
+};
+
+static bool Matches(const HookSpec& hook) {
+    const size_t count = std::strlen(hook.bytes) / 2;
+    unsigned char actual[64]{};
+    if (count > sizeof(actual) || !CopyMemoryChecked(image + hook.rva, actual, count)) return false;
+    const auto hex = [](char c) { return c <= '9' ? c - '0' : c - 'a' + 10; };
+    for (size_t i = 0; i < count; ++i) if (actual[i] != ((hex(hook.bytes[i * 2]) << 4) | hex(hook.bytes[i * 2 + 1]))) return false;
+    return true;
+}
+
+static bool InstallHooks() {
+    for (const auto& hook : hooks) if (!Matches(hook)) return false;
+    if (!Matches({0x27fed0, "8b91fc0000008b4424043b5004", nullptr, nullptr}) || !Matches({0x27fc60, "8b91f00000008b4424043b10", nullptr, nullptr})) return false;
+    if (!Matches({0x281d50,"558bec83e4f883ec18535556578be98b8d18",nullptr,nullptr}) ||
+        !Matches({0x53630,"568bf1e818e722008b86900100008b8e9401",nullptr,nullptr})) return false;
+    if (!Matches({0x86f17,"8b44241083c008894424103b4424300f8514fcffff8b7424",nullptr,nullptr}) ||
+        !Matches({0x1ffca0,"64a1000000006aff68636f7c0050648925000000008b8394",nullptr,nullptr}) ||
+        !Matches({0x22c260,"518b0085c074048b08eb0233c985c0740583c004eb05b806",nullptr,nullptr})) return false;
+    if (!Matches({0x281540,"83ec14535556578bf98b87b4000000c1e803897c2414a801",nullptr,nullptr})) return false;
+    if (!Matches({0x18beb0,"6aff68fb707c0064a100000000506489250000000083ec08",nullptr,nullptr}) ||
+        !Matches({0x18bd80,"6aff68cb717c0064a100000000506489250000000083ec08",nullptr,nullptr}) ||
+        !Matches({0x18e400,"565785c07454e8b512ffff8bf0f686d800000001",nullptr,nullptr})) return false;
+    if (!Matches({0x288f04,"c7842428010000ffffffff85f674168d560483c8fff00fc1",nullptr,nullptr})) return false;
+    static NativePatchSet patches;
+    MoveControlContinue = image+0x28118c;
+    const size_t lengths[] = {5,7,7,6,6,6,5,8,7,5,6,6,8,6,6,6,6,7,6,7,7,9,7,7};
+    static_assert(std::size(lengths) == std::size(hooks));
+    std::array<NativePatchSpec,std::size(hooks)> specs{};
+    for (size_t i=0;i<specs.size();++i) specs[i]={reinterpret_cast<void*>(image+hooks[i].rva),hooks[i].handler,hooks[i].original,hooks[i].bytes,lengths[i]};
+    InterlockedExchange(&ready, 1);
+    if (patches.Install(specs.data(),specs.size())) return true;
+    InterlockedExchange(&ready, 0);
+    return false;
+}
+
+static BOOL CALLBACK InitializeAddon() {
+    wchar_t executable[32768]{};
+    const DWORD chars = GetModuleFileNameW(nullptr, executable, static_cast<DWORD>(std::size(executable)));
+    if (!chars || chars >= std::size(executable)) return TRUE;
+    const std::filesystem::path path(executable);
+    if (_wcsicmp(path.filename().c_str(), L"DungeonRunners.exe") != 0) return TRUE;
+    std::filesystem::path status;
+    try {
+        const auto directory = path.parent_path();
+        const auto addon = directory / L"Addons" / L"DamageMeter";
+        std::filesystem::create_directories(addon);
+        status = addon / L"status.txt";
+        const auto archive = ArchiveMeterReports(directory, addon / L"reports", [](const auto& file) { return FileHash(file, WindowsHash::Sha256Algorithm, 32); });
+        const auto digest = FileHash(path, WindowsHash::Sha256Algorithm, 32);
+        if (!ClientImageCompatible(path)) throw std::runtime_error("Required client code or layout differs; addon disabled");
+        if (!VerifyCatalog(directory)) throw std::runtime_error("Skill data identity differs; addon disabled");
+        image = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+        const NativeReader reader(image,CopyMemoryChecked,LookupLabel);
+        const bool mouseLookCompatible = MouseLookProfileMatches(reader,image);
+        const auto settings = (addon / L"ui.ini").u8string();
+        mythicSounds.Configure(directory / L"Addons" / L"MythicDropSounds");
+        wishingWell.Configure(directory / L"Addons" / L"WishingWellTracker");
+        history.Open(addon / L"history.bin");
+        if (!MeterOverlayStart(settings.c_str())) throw std::runtime_error("UI initialization failed; addon disabled");
+        MeterOverlayWorld(false);
+        MeterOverlayInputTest(OverlayInput);
+        MeterOverlayHotkeyTest(OverlayHotkey);
+        MeterOverlayCharacterInputTest(CharacterInput);
+        MeterOverlayBankInputTest(BankInput);
+        MeterOverlayLoadoutInputTest(LoadoutInput);
+        InterlockedExchange(&nameplateMask,static_cast<LONG>(MeterOverlayNameplates()));
+        if (!InstallHooks()) throw std::runtime_error("Native hook validation failed; addon disabled");
+        if (MeterOverlayUnbindInstalled()) {
+            static NativePatchSet leftClickPatch;
+            const NativePatchSpec spec{reinterpret_cast<void*>(image+0x2aad0),reinterpret_cast<void*>(LeftClickFallbackHook),
+                &LeftClickFallbackOriginal,"8b4c2404575156e804f5ffff84c07403895e5cc20400",5};
+            const bool valid = Matches({0x2aaa0,"8bc32b465c3dc800000076378b463483f8017507b869000000eb0985c07511b86a000000568bcfe8c4f1ffff84c07510",nullptr,nullptr});
+            MeterOverlayUnbindAvailable(valid && leftClickPatch.Install(&spec,1));
+            InterlockedExchange(&unbindLeft,MeterOverlayUnbindEnabled() ? 1 : 0);
+        }
+        bool mouseLookInstalled = false;
+        if (MeterOverlayMouseLookInstalled()) {
+            static NativePatchSet mouseLookPatches;
+            MouseLookSelectContinue = image + 0x2a9f8;
+            MouseLookSelectExit = image + 0x2aa99;
+            const NativePatchSpec specs[] = {
+                {reinterpret_cast<void*>(image + 0x2a9f0),reinterpret_cast<void*>(MouseLookSelectHook),&MouseLookSelectGateway,"85ff0f84a1000000807e78000f8480000000807e7a00740d",8},
+                {reinterpret_cast<void*>(image + 0x2a2b0),reinterpret_cast<void*>(MouseLookClickHook),&MouseLookClickOriginal,"83ec0853558b6c241456578bf86a008bc5e80ac004008b0d",5},
+                {reinterpret_cast<void*>(image + 0x2ee930),reinterpret_cast<void*>(MouseLookRightHook),&MouseLookRightOriginal,"33c038818d0000000f95c0c3",8}
+            };
+            mouseLookInstalled = mouseLookCompatible && mouseLookPatches.Install(specs,std::size(specs));
+            MeterOverlayMouseLookAvailable(mouseLookInstalled);
+        }
+        std::ofstream output(status, std::ios::trunc);
+        output << "Addons loaded inside DungeonRunners.exe\nClient SHA256: " << digest << "\nHooks: " << std::size(hooks) << "\nSkill labels: " << std::size(SkillLabels) << "\nZone definitions: " << std::size(DungeonZones) << "\n";
+        output << "Mouse look hooks: " << (mouseLookInstalled ? "installed" : "unavailable") << '\n';
+        HMODULE ownModule = nullptr;
+        wchar_t ownPath[32768]{};
+        if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, reinterpret_cast<LPCWSTR>(&InitializeAddon), &ownModule) && GetModuleFileNameW(ownModule, ownPath, static_cast<DWORD>(std::size(ownPath))))
+            output << "Addon SHA256: " << FileHash(ownPath, WindowsHash::Sha256Algorithm, 32) << "\nAddon base: " << std::hex << reinterpret_cast<uintptr_t>(ownModule) << std::dec << '\n';
+        SYSTEMTIME now{};
+        GetSystemTime(&now);
+        output << "Process: " << GetCurrentProcessId() << "\nStarted UTC: " << now.wYear << '-' << now.wMonth << '-' << now.wDay << 'T' << now.wHour << ':' << now.wMinute << ':' << now.wSecond << "\n";
+        output << "Crash archive: copied=" << archive.copied << " existing=" << archive.existing << " skipped=" << archive.skipped << " errors=" << archive.errors << "\n";
+    } catch (const std::exception& error) {
+        if (!status.empty()) { std::ofstream output(status, std::ios::trunc); output << error.what() << '\n'; }
+    } catch (...) {}
+    return TRUE;
+}
+
+extern "C" BOOL WINAPI DungeonRunnersAddonsInitialize(uint32_t version) {
+    if (version != DungeonRunnersAddonsApiVersion) return FALSE;
+    try { bootstrap.Run(InitializeAddon); } catch (...) { return FALSE; }
+    return InterlockedCompareExchange(&ready, 0, 0) ? TRUE : FALSE;
+}
+
+BOOL WINAPI DllMain(HINSTANCE, DWORD reason, LPVOID) {
+    if (reason == DLL_PROCESS_ATTACH) {if(!pendingHit.Initialize())return FALSE;if(!mouseLookReleasing.Initialize()){pendingHit.Shutdown();return FALSE;}}
+    if (reason == DLL_THREAD_DETACH) {pendingHit.ReleaseCurrent();mouseLookReleasing.ReleaseCurrent();}
+    if (reason == DLL_PROCESS_DETACH) { InterlockedExchange(&ready, 0); InterlockedExchange(&collecting, 0); pendingHit.Shutdown();mouseLookReleasing.Shutdown(); }
+    return TRUE;
+}
