@@ -3,12 +3,16 @@
 #include <windows.h>
 #include <Xinput.h>
 #include "controller.h"
+#include "native_dualsense.h"
 #include "native_reader.h"
 
 class NativeController {
     using GetState=DWORD (WINAPI*)(DWORD,XINPUT_STATE*);
     GetState getState=nullptr;
     bool attempted=false,profileChecked=false,itemProfile=false;
+    bool dualSenseActive=false,allowDualSense=true;
+    unsigned dualSenseGeneration=0;
+    NativeDualSense dualSense;
     DWORD slot=0;
     uint64_t nextProbe=0,messageUntil=0;
     std::array<bool,256> held{};
@@ -48,7 +52,7 @@ class NativeController {
         return PtInRect(&area,point)!=FALSE;
     }
     void Message(const char* text,uint64_t now) { status.message=text; messageUntil=now+5000; }
-    Controller::Pad ReadPad(uint64_t now) {
+    Controller::Pad ReadPad(uint64_t now,HWND window) {
         if (!attempted) {
             attempted=true;
             for (auto name:{L"xinput1_4.dll",L"xinput1_3.dll",L"xinput9_1_0.dll"}) {
@@ -60,15 +64,25 @@ class NativeController {
             }
         }
         Controller::Pad pad;
-        if (!getState || now<nextProbe) return pad;
-        XINPUT_STATE state{};
-        if (getState(slot,&state)!=ERROR_SUCCESS) {
-            for (slot=0;slot<XUSER_MAX_COUNT;++slot) if (getState(slot,&state)==ERROR_SUCCESS) break;
-            if (slot==XUSER_MAX_COUNT) { slot=0; nextProbe=now+500; return pad; }
-            Release();
+        if (getState && now>=nextProbe) {
+            XINPUT_STATE state{};
+            bool found=getState(slot,&state)==ERROR_SUCCESS;
+            if (!found) {
+                for (slot=0;slot<XUSER_MAX_COUNT;++slot) if (getState(slot,&state)==ERROR_SUCCESS) { found=true; break; }
+                if (found) Release();
+            }
+            if (found) {
+                if (dualSenseActive) { Release(); dualSense.Disconnect(); dualSenseActive=false; }
+                const auto& value=state.Gamepad;
+                return {true,value.wButtons,value.sThumbLX,value.sThumbLY,value.sThumbRX,value.sThumbRY,value.bLeftTrigger,value.bRightTrigger};
+            }
+            slot=0; nextProbe=now+500;
         }
-        const auto& value=state.Gamepad;
-        pad={true,value.wButtons,value.sThumbLX,value.sThumbLY,value.sThumbRX,value.sThumbRY,value.bLeftTrigger,value.bRightTrigger};
+        if (allowDualSense) pad=dualSense.Read(window,now);
+        if (pad.connected && (!dualSenseActive || dualSenseGeneration!=dualSense.Generation())) {
+            Release(); dualSenseActive=true; dualSenseGeneration=dualSense.Generation();
+        }
+        if (!pad.connected) dualSenseActive=false;
         return pad;
     }
     static bool Visible(const NativeReader& reader,uintptr_t node) {
@@ -197,7 +211,7 @@ class NativeController {
         if (!success) { Release(); Message("Controller input could not be delivered.",now); }
     }
 public:
-    explicit NativeController(DWORD (WINAPI* provider)(DWORD,XINPUT_STATE*)=nullptr) : getState(provider),attempted(provider!=nullptr) {}
+    explicit NativeController(DWORD (WINAPI* provider)(DWORD,XINPUT_STATE*)=nullptr) : getState(provider),attempted(provider!=nullptr),allowDualSense(provider==nullptr) {}
     const Controller::Status& Status() const { return status; }
     void Release() {
         for (unsigned key=0;key<held.size();++key) if (held[key] && Key(key,false)) held[key]=false;
@@ -206,14 +220,15 @@ public:
     }
     void Service(const NativeReader& reader,uintptr_t image,const Controller::Settings& settings,HWND window,bool overlay,uint64_t now) {
         if (!settings.enabled) { Release(); status={}; status.message="Controller is off."; return; }
-        const auto pad=ReadPad(now);
-        if (!pad.connected) { Release(); status={}; status.message="Connect a gamepad. Steam Input: Gamepad template."; return; }
+        const auto pad=ReadPad(now,window);
+        if (!pad.connected) { Release(); status={}; status.message="Connect an Xbox or PS5 controller. Steam Input: Gamepad template."; return; }
         const bool focused=Foreground(window);
         const auto frame=input.Step(pad,settings,focused,Gameplay(reader,image,overlay),now);
         status.connected=frame.connected; status.pointer=frame.pointer; status.layer=frame.layer; status.waiting=frame.waiting; status.slot=slot+1;
+        status.playstation=pad.playstation;
         if (!focused) status.message="Paused while the game is in the background.";
         else if (frame.waiting) status.message="Release the sticks and buttons to continue.";
-        else if (now>=messageUntil) status.message=frame.pointer ? "Cursor mode. R3 returns to combat." : "Combat mode. Hold LB for skills 5-8.";
+        else if (now>=messageUntil) status.message=frame.pointer ? "Cursor mode. R3 returns to combat." : Controller::PlayStation(settings,status) ? "Combat mode. Hold L1 for skills 5-8." : "Combat mode. Hold LB for skills 5-8.";
         if (!focused) { Release(); return; }
         Apply(frame,reader,image,window,now);
     }

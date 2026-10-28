@@ -31,7 +31,7 @@
 - **Cursor Circle** — Adjustable combat cursor highlight.
 - **Loadouts & Sorting** — Gear and hotbar saves; Inventory and selected bank page sorting.
 - **Leaderboard** — Official PvE rankings and PvP Rating; all time or this week.
-- **Controller** — Gamepad movement, combat and menus.
+- **Controller** — Xbox/XInput and PS5 DualSense movement, combat and menus, with Xbox or PlayStation button labels. Steam Deck uses the Steam Input Gamepad template.
 - **Enhanced Settings** — Camera, attack controls and low-HP warning.
 
 <details>

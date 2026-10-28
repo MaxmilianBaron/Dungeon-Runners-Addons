@@ -48,7 +48,7 @@ try {
     & cl.exe @options /LD (Join-Path $sourceDirectory 'addon_loader.cpp') /link /SUBSYSTEM:WINDOWS,5.01 /OSVERSION:5.1 /DYNAMICBASE /NXCOMPAT /OUT:d3d9.dll "/DEF:$sourceDirectory\d3d9.def"
     if ($LASTEXITCODE -ne 0) { throw 'Addon loader compilation failed' }
     $audioSources = @('audio.cpp','wave.cpp','mp3.cpp') | ForEach-Object { Join-Path $audioDirectory ('src\'+$_) }
-    & cl.exe @options /LD (Join-Path $sourceDirectory 'native_addon.cpp') (Join-Path $sourceDirectory 'native_hooks.cpp') (Join-Path $sourceDirectory 'mouse_look_hooks.cpp') (Join-Path $sourceDirectory 'overlay.cpp') (Join-Path $sourceDirectory 'AardvarkUI\ui.cpp') @audioSources /link /SUBSYSTEM:WINDOWS,5.01 /OSVERSION:5.1 /DYNAMICBASE /NXCOMPAT /OUT:Addons.dll "/DEF:$sourceDirectory\damage_meter.def" @httpsLibraries notices.res user32.lib gdi32.lib advapi32.lib winhttp.lib ws2_32.lib
+    & cl.exe @options /LD (Join-Path $sourceDirectory 'native_addon.cpp') (Join-Path $sourceDirectory 'native_hooks.cpp') (Join-Path $sourceDirectory 'mouse_look_hooks.cpp') (Join-Path $sourceDirectory 'overlay.cpp') (Join-Path $sourceDirectory 'AardvarkUI\ui.cpp') @audioSources /link /SUBSYSTEM:WINDOWS,5.01 /OSVERSION:5.1 /DYNAMICBASE /NXCOMPAT /OUT:Addons.dll "/DEF:$sourceDirectory\damage_meter.def" @httpsLibraries notices.res user32.lib gdi32.lib advapi32.lib winhttp.lib ws2_32.lib dinput8.lib dxguid.lib
     if ($LASTEXITCODE -ne 0) { throw 'Native addon compilation failed' }
 } finally { Pop-Location }
 foreach ($library in @('d3d9.dll','Addons.dll')) {

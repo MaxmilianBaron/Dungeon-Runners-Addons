@@ -14,18 +14,19 @@ enum Button : uint16_t {
 };
 struct Settings {
     bool enabled=true, hints=true, invertY=false;
-    unsigned deadzone=20, speed=100, trigger=20;
+    unsigned deadzone=20, speed=100, trigger=20, labels=0;
     std::array<unsigned,8> slots{{1,2,3,4,5,6,7,8}};
     bool Valid() const {
-        return deadzone>=10 && deadzone<=40 && speed>=25 && speed<=200 && trigger>=10 && trigger<=80 &&
+        return deadzone>=10 && deadzone<=40 && speed>=25 && speed<=200 && trigger>=10 && trigger<=80 && labels<=2 &&
             std::all_of(slots.begin(),slots.end(),[](unsigned slot) { return slot>=1 && slot<=8; });
     }
     bool Load(std::istream& input) {
         Settings value;
         unsigned version=0,on=0,show=0,invert=0;
         if (!(input>>version>>on>>show>>value.deadzone>>value.speed>>value.trigger>>invert) ||
-            version!=1 || on>1 || show>1 || invert>1) return false;
+            (version!=1 && version!=2) || on>1 || show>1 || invert>1) return false;
         for (auto& slot:value.slots) if (!(input>>slot)) return false;
+        if (version==2 && !(input>>value.labels)) return false;
         char extra=0;
         if (input>>extra || !value.Valid()) return false;
         value.enabled=on!=0; value.hints=show!=0; value.invertY=invert!=0;
@@ -34,9 +35,9 @@ struct Settings {
     }
     bool Write(std::ostream& output) const {
         if (!Valid()) return false;
-        output<<1<<' '<<enabled<<' '<<hints<<' '<<deadzone<<' '<<speed<<' '<<trigger<<' '<<invertY;
+        output<<2<<' '<<enabled<<' '<<hints<<' '<<deadzone<<' '<<speed<<' '<<trigger<<' '<<invertY;
         for (auto slot:slots) output<<' '<<slot;
-        output<<'\n';
+        output<<' '<<labels<<'\n';
         return output.good();
     }
 };
@@ -45,6 +46,7 @@ struct Pad {
     uint16_t buttons=0;
     int16_t lx=0,ly=0,rx=0,ry=0;
     uint8_t lt=0,rt=0;
+    bool playstation=false;
 };
 struct Stick { float x=0,y=0; };
 inline Stick Normalize(int16_t x,int16_t y,unsigned deadzone) {
@@ -153,5 +155,7 @@ struct Status {
     bool connected=false,pointer=false,layer=false,waiting=false;
     unsigned slot=0;
     const char* message="Connect a gamepad to begin.";
+    bool playstation=false;
 };
+inline bool PlayStation(const Settings& settings,const Status& status) { return settings.labels==2 || (!settings.labels && status.playstation); }
 }
