@@ -1,0 +1,105 @@
+static void OpenControllerSettings() {
+    draftControllerOptions=controllerOptions; controllerPage=0; controllerMessage.clear();
+}
+
+static bool SaveControllerSettings() {
+    std::error_code error;
+    std::filesystem::create_directories(controllerSettings.parent_path(),error);
+    if (error) return false;
+    auto pending=controllerSettings; pending+=L".pending";
+    std::ofstream output(pending,std::ios::trunc);
+    const bool written=draftControllerOptions.Write(output);
+    output.close();
+    return written && output.good() && MoveFileExW(pending.c_str(),controllerSettings.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH);
+}
+
+static void DrawControllerSettings(UiPoint origin,UiPoint scale) {
+    const auto point=[origin,scale](float x,float y) { return At(origin,scale,x,y); };
+    auto* draw=Ui::GetWindowDrawList();
+    const bool playstation=Controller::PlayStation(draftControllerOptions,controllerStatus);
+    Heading(draw,"Controller",point(34,20),scale,280);
+    constexpr const char* pages[]={"Controls","Skills","Layout"};
+    const int pageStep=OptionRow("Settings:",pages[controllerPage],point(10,58),scale,"Okay saves every page. Back discards changes.",point(355,58),origin.x,nullptr,true);
+    if (pageStep) controllerPage=unsigned((int(controllerPage)+pageStep+3)%3);
+    auto toggle=[&](const char* name,bool& value,float y,const char* description) {
+        if (OptionRow(name,value ? "On" : "Off",point(10,y),scale,description,point(355,y),origin.x,nullptr,true)) value=!value;
+    };
+    auto number=[&](const char* name,unsigned& value,float y,unsigned minimum,unsigned maximum,unsigned increment,const char* description) {
+        const auto text=std::to_string(value)+"%";
+        const int step=OptionRow(name,text.c_str(),point(10,y),scale,description,point(355,y),origin.x,nullptr,true);
+        if (step) value=unsigned(std::clamp(int(value)+step*int(increment),int(minimum),int(maximum)));
+    };
+    if (!controllerPage) {
+        toggle("Controller:",draftControllerOptions.enabled,96,"Enables Xbox/Steam Input gamepads and direct PS5 DualSense on Windows. Mouse and keyboard remain available.");
+        toggle("Button hints:",draftControllerOptions.hints,130,"Shows the active combat or cursor bindings above the skill bar.");
+        number("Stick deadzone:",draftControllerOptions.deadzone,164,10,40,5,"Increase this if the character, camera or cursor moves while the sticks are released.");
+        if (OptionRow("Right stick:",draftControllerOptions.rightStick ? "Aim" : "Camera",point(10,198),scale,"Camera turns left/right and zooms up/down in combat. Aim moves the cursor. Menus always use the cursor.",point(355,198),origin.x,nullptr,true)) draftControllerOptions.rightStick=1-draftControllerOptions.rightStick;
+        number("Cursor speed:",draftControllerOptions.speed,232,25,200,25,playstation ? "Both sticks move the cursor in menus. Hold L1 for precision." : "Both sticks move the cursor in menus. Hold LB for precision.");
+        number("Trigger threshold:",draftControllerOptions.trigger,266,10,80,5,"How far a trigger must be pressed to attack or click.");
+        toggle("Invert stick Y:",draftControllerOptions.invertY,300,"Reverses vertical cursor movement or camera zoom on the right stick.");
+        constexpr const char* styles[]={"Automatic","Xbox","PlayStation"};
+        const int style=OptionRow("Button labels:",styles[draftControllerOptions.labels],point(10,334),scale,"Automatic detects a directly connected DualSense. Choose PlayStation when using a PS5 controller through Steam Input.",point(355,334),origin.x,nullptr,true);
+        if (style) draftControllerOptions.labels=unsigned((int(draftControllerOptions.labels)+style+3)%3);
+        MeterText(draw,playstation ? "Steam Input: Gamepad; touchpad as mouse." : "Steam Deck: Gamepad template in Steam Input.\nSTEAM + X: keyboard.",point(34,370),scale,BodyColor,282*scale.x);
+    } else if (controllerPage==1) {
+        constexpr const char* xbox[]={"A:","B:","X:","Y:","LB + A:","LB + B:","LB + X:","LB + Y:"};
+        constexpr const char* sony[]={"Cross:","Circle:","Square:","Triangle:","L1 + Cross:","L1 + Circle:","L1 + Square:","L1 + Triangle:"};
+        const auto* labels=playstation ? sony : xbox;
+        for (unsigned i=0;i<8;++i) {
+            auto& slot=draftControllerOptions.slots[i];
+            const float y=96+32.f*i;
+            const auto text="Skill "+std::to_string(slot);
+            const int step=OptionRow(labels[i],text.c_str(),point(10,y),scale,"Activates a hotbar slot once per press. Uses the current game key binding; assign a key without Ctrl or Shift.",point(355,y),origin.x,nullptr,true);
+            if (step) slot=unsigned((int(slot)-1+step+8)%8)+1;
+        }
+        const auto movement=std::string("Move: left stick. ")+(draftControllerOptions.rightStick ? "Aim" : "Camera")+": right stick.\n";
+        MeterText(draw,(movement+(playstation ? "R2: left attack. L2: right attack." : "RT: left attack. LT: right attack.")).c_str(),point(34,362),scale,BodyColor,282*scale.x);
+    } else {
+        const auto movement=std::string("Left stick: move\nRight stick: ")+(draftControllerOptions.rightStick ? "aim / cursor\n" : "turn / zoom camera\n");
+        const auto layout=movement+(playstation ?
+            "R2 / L2: left / right mouse\nCross Circle Square Triangle: skills 1-4\nHold L1: skills 5-8\nD-pad left / right: health / mana\nD-pad down: scroll; up: map\nL1 + D-pad: turn / zoom camera\nR1: show loot; L3: reset camera\nCreate: inventory\nOptions: Escape\nR3: toggle cursor mode\nTouchpad: mouse via Steam Input\n\nMenus: Cross click, Square right click,\nCircle back, Triangle Enter, L3 Tab.\nD-pad up / down: scroll." :
+            "RT / LT: left / right mouse\nA B X Y: skills 1-4\nHold LB: skills 5-8\nD-pad left / right: health / mana\nD-pad down: scroll; up: map\nLB + D-pad: turn / zoom camera\nRB: show loot; L3: reset camera\nView / Back: inventory\nMenu / Start: Escape\nR3: toggle cursor mode\n\nMenus: A click, X right click,\nB back, Y Enter, L3 Tab.\nD-pad up / down: scroll.");
+        MeterText(draw,layout.c_str(),
+            point(34,96),UiPoint(scale.x*.93f,scale.y*.93f),BodyColor,282*scale.x);
+    }
+    const char* message=controllerMessage.empty() ? controllerStatus.message : controllerMessage.c_str();
+    draw->PushClipRect(point(24,412),point(326,446));
+    MeterText(draw,message,point(24,412),scale,GoldColor,302*scale.x);
+    draw->PopClipRect();
+    if (HoverArea(point(24,412),UiPoint(302*scale.x,34*scale.y))) QueueHelp(message,point(355,412),scale,origin.x);
+    if (DrawSkinControl("Okay",point(24,452),scale)) {
+        if (SaveControllerSettings()) { MeterControllerRelease(); controllerOptions=draftControllerOptions; activeAddon=nullptr; }
+        else controllerMessage="Settings could not be saved.";
+    }
+    if (DrawSkinControl("Back",point(185,452),scale)) activeAddon=nullptr;
+}
+
+static void DrawControllerHints() {
+    if (!addonRegistry.ControllerEnabled() || !controllerOptions.enabled || !controllerOptions.hints || !controllerStatus.connected ||
+        !gameWindow || GetForegroundWindow()!=gameWindow || addonsOpen || leaderboardOpen) return;
+    const auto display=Ui::GetIO().DisplaySize;
+    if (display.x<320 || display.y<200) return;
+    const float factor=std::min({std::max(GameScale().y,1.5f),display.x/680.f,display.y/480.f});
+    const UiPoint scale(factor,factor),size(644*factor,47*factor);
+    const UiPoint origin((display.x-size.x)*.5f,display.y-128*factor);
+    const bool playstation=Controller::PlayStation(controllerOptions,controllerStatus);
+    Ui::SetNextWindowPos(origin); Ui::SetNextWindowSize(size);
+    if (Ui::Begin("##ControllerHints",nullptr,Ui::NoInputs|Ui::NoSavedSettings)) {
+        auto* draw=Ui::GetWindowDrawList();
+        draw->AddRectFilled(origin,UiPoint(origin.x+size.x,origin.y+size.y),UI_COLOR(8,7,4,195));
+        char text[192]{};
+        if (controllerStatus.waiting) std::snprintf(text,sizeof(text),"%s",controllerStatus.message);
+        else if (controllerStatus.pointer) std::snprintf(text,sizeof(text),"%s",playstation ? "CURSOR  Cross Click  Square Right  Circle Back  Triangle Enter  L1 Fine  R3 Combat" : "CURSOR   A Click   X Right click   B Back   Y Enter   LB Precision   R3 Combat");
+        else {
+            const unsigned offset=controllerStatus.layer ? 4 : 0;
+            const auto& slots=controllerOptions.slots;
+            std::snprintf(text,sizeof(text),playstation ? "%sCross %u  Circle %u  Square %u  Triangle %u   R2 / L2 Attack   R3 Cursor" : "%sA %u   B %u   X %u   Y %u     RT / LT Attack     R3 Cursor",
+                controllerStatus.layer ? (playstation ? "L1 + " : "LB + ") : "",slots[offset],slots[offset+1],slots[offset+2],slots[offset+3]);
+        }
+        MeterText(draw,text,At(origin,scale,10,6),scale,GoldColor,624*factor);
+        const auto combat=std::string("Right stick: ")+(controllerOptions.rightStick ? "aim" : "camera")+(playstation ? "   L1: skills 5-8   Create: bag   Options: Esc" : "   LB: skills 5-8   View: bag   Menu: Esc");
+        MeterText(draw,controllerStatus.pointer ? (playstation ? "Sticks: cursor    D-pad: scroll    Create: inventory    Options: Escape" : "Sticks: cursor     D-pad: scroll     View: inventory     Menu: Escape") : combat.c_str(),
+            At(origin,scale,10,27),UiPoint(factor*.9f,factor*.9f),BodyColor,624*factor);
+    }
+    Ui::End();
+}
