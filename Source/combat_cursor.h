@@ -3,11 +3,14 @@
 #include <istream>
 #include <ostream>
 
+inline constexpr unsigned CursorRainbowColor = 8;
+inline constexpr unsigned CursorColorCount = CursorRainbowColor + 1;
+
 struct CombatCursorSettings {
     bool enabled = true;
     unsigned radius = 18;
     unsigned color = 0;
-    bool Valid() const { return radius >= 12 && radius <= 40 && radius % 2 == 0 && color < 8; }
+    bool Valid() const { return radius >= 12 && radius <= 40 && radius % 2 == 0 && color < CursorColorCount; }
     bool Load(std::istream& input) {
         unsigned on = 0, size = 0, shade = 0;
         if (!(input >> on >> size >> shade) || on > 1) return false;

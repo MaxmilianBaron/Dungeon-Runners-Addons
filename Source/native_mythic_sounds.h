@@ -4,10 +4,13 @@
 #include "native_chat.h"
 #include "custom_mythic_sound.h"
 #include "native_catalog.generated.h"
+#include "native_boss_chest.h"
 
 class NativeMythicSounds {
     MythicQueue queue;
     MythicNotices notices;
+    BossChestNotices chestNotices;
+    uint64_t nextChestPoll = 0;
     CustomMythicSound custom;
     bool customSelected = false;
     int channel = -1;
@@ -31,6 +34,7 @@ class NativeMythicSounds {
         if (!zone) { key.clear(); seed = 0; }
         if (activeZone != zone || zoneSeed != seed || zoneKey != key) {
             queue.Clear(); notices.Clear();
+            chestNotices.Reset(); nextChestPoll = 0;
             if (!previewActive) StopPlayback(r,image);
             activeZone = zone; zoneSeed = seed; zoneKey = std::move(key);
         }
@@ -157,7 +161,7 @@ public:
     CustomSoundStatus CustomStatus() const { return custom.Status(); }
     bool TakeCustomImport() { return custom.TakeImported(); }
     bool Drop(const NativeReader& r,uintptr_t image,uintptr_t object,uint64_t now) {
-        if (!enabled || !Dungeon(r,image) || r.Pointer(object) != image+0x4928c8) return false;
+        if (!(soundEnabled || announcementsEnabled) || !Dungeon(r,image) || r.Pointer(object) != image+0x4928c8) return false;
         uint8_t state = 255;
         uint32_t owner = 0;
         bool own = false;
@@ -172,10 +176,11 @@ public:
         return true;
     }
     void InventoryDrop(const NativeReader& r,uintptr_t image,uintptr_t object,uint64_t now) {
-        if (enabled && Dungeon(r,image)) queue.Ignore(object,r.Pointer(object+0x114),now);
+        if ((soundEnabled || announcementsEnabled) && Dungeon(r,image)) queue.Ignore(object,r.Pointer(object+0x114),now);
     }
     void Reset(const NativeReader& r,uintptr_t image) {
         queue.Clear(); notices.Clear(); enabled = soundEnabled = announcementsEnabled = false;
+        chestNotices.Reset(); nextChestPoll = 0;
         activeZone = 0; zoneSeed = 0; zoneKey.clear();
         StopPlayback(r,image);
     }
@@ -183,17 +188,24 @@ public:
         if (!world) { if (enabled || channel >= 0 || custom.Busy()) Reset(r,image); return; }
         const bool dungeon = Dungeon(r,image);
         customSelected = settings.sound == MythicCustomSound;
-        if (!settings.enabled && !settings.announcements && enabled) Reset(r,image);
+        if (!settings.enabled && !settings.announcements && !settings.bossChestInfo && enabled) Reset(r,image);
         if (!settings.enabled && soundEnabled) {
             queue.ClearPending(); StopPlayback(r,image);
         }
         if (!settings.announcements && announcementsEnabled) notices.Clear();
         soundEnabled = settings.enabled;
         announcementsEnabled = settings.announcements;
-        enabled = soundEnabled || announcementsEnabled;
+        enabled = soundEnabled || announcementsEnabled || settings.bossChestInfo;
+        if (!settings.bossChestInfo) { chestNotices.Reset(); nextChestPoll = 0; }
         const bool due = now >= nextPoll;
         if (preview < 0 && ((!enabled && !pulses) || !due)) return;
         if (due) {
+            if (settings.bossChestInfo && dungeon && BossChestInfoZone(zoneKey) && !chatFailed && now>=nextChestPoll) {
+                nextChestPoll=now+1000;
+                if (ChatReady(r,image)) {
+                    if (const auto* text=chestNotices.Observe(ReadBossChestPresence(r,image))) notices.Push(text,now);
+                }
+            }
             if (dungeon && !chatFailed && notices.Peek(now)) {
                 const uintptr_t client = ChatReady(r,image);
                 if (client) for (unsigned sent = 0; sent < 8; ++sent) {

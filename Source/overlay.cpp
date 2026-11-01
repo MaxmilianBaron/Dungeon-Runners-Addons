@@ -390,7 +390,7 @@ static bool SaveMythicSettings(const MythicSettings& value = draftMythicOptions)
     auto pending = mythicSettings;
     pending += L".pending";
     std::ofstream output(pending,std::ios::trunc);
-    output << (value.enabled ? 1 : 0) << ' ' << value.sound << ' ' << (value.announcements ? 1 : 0) << ' ' << value.volume << '\n';
+    output << (value.enabled ? 1 : 0) << ' ' << value.sound << ' ' << (value.announcements ? 1 : 0) << ' ' << value.volume << ' ' << (value.bossChestInfo ? 1 : 0) << '\n';
     output.close();
     return output.good() && MoveFileExW(pending.c_str(),mythicSettings.c_str(),MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
 }
@@ -1563,10 +1563,12 @@ static void DrawMythicSettings(UiPoint origin,UiPoint scale) {
         "Plays a sound for your and your party's Mythic drops in this zone.",point(355,58),origin.x)) draftMythicOptions.enabled = !draftMythicOptions.enabled;
     if (OptionRow("Announcements:",draftMythicOptions.announcements ? "On" : "Off",point(10,96),scale,
         "Shows Mythic drop messages in your chat.",point(355,96),origin.x)) draftMythicOptions.announcements = !draftMythicOptions.announcements;
-    Heading(draw,"Sound:",point(35,137),scale,200,0.85f);
-    draw->AddRectFilled(point(24,157),point(326,189),UI_COLOR(0,0,0,100));
+    if (OptionRow("Boss chest info:",draftMythicOptions.bossChestInfo ? "On" : "Off",point(10,134),scale,
+        "Reports boss chests detected by the game in boss instances. May update if a chest appears later.",point(355,134),origin.x)) draftMythicOptions.bossChestInfo = !draftMythicOptions.bossChestInfo;
+    Heading(draw,"Sound:",point(35,175),scale,200,0.85f);
+    draw->AddRectFilled(point(24,195),point(326,227),UI_COLOR(0,0,0,100));
     for (unsigned side=0;side<2;++side) {
-        const UiPoint at = point(side ? 305.0f : 25.0f,163);
+        const UiPoint at = point(side ? 305.0f : 25.0f,201);
         Ui::SetCursorScreenPos(at);
         if (Ui::InvisibleButton(side ? "sound-next" : "sound-previous",UiPoint(20*scale.x,20*scale.y))) {
             draftMythicOptions.sound = (draftMythicOptions.sound + (side ? 1 : unsigned(std::size(MythicSounds)-1))) % std::size(MythicSounds);
@@ -1575,26 +1577,26 @@ static void DrawMythicSettings(UiPoint origin,UiPoint scale) {
     }
     const char* name = MythicSounds[draftMythicOptions.sound].name;
     const auto extent = valueFont->CalcTextSizeA(14*scale.y,FLT_MAX,0,name);
-    BodyText(draw,name,UiPoint(origin.x+175*scale.x-extent.x/2,origin.y+173*scale.y-extent.y/2),scale,BodyColor);
+    BodyText(draw,name,UiPoint(origin.x+175*scale.x-extent.x/2,origin.y+211*scale.y-extent.y/2),scale,BodyColor);
     char volume[16];
     std::snprintf(volume,sizeof(volume),"%u",draftMythicOptions.volume/10);
     const bool custom = draftMythicOptions.sound == MythicCustomSound;
-    const int volumeStep = OptionRow("Volume:",volume,point(10,202),scale,custom ? "Mythic sound volume." : "Mythic sound volume. Uses the game's sound volume.",point(355,202),origin.x);
+    const int volumeStep = OptionRow("Volume:",volume,point(10,240),scale,custom ? "Mythic sound volume." : "Mythic sound volume. Uses the game's sound volume.",point(355,240),origin.x);
     if (volumeStep) draftMythicOptions.volume = static_cast<unsigned>(std::clamp(static_cast<int>(draftMythicOptions.volume)+volumeStep*10,0,100));
-    if (custom && DrawSkinControl("Browse",point(24,240),scale)) mythicBrowse = true;
-    if (DrawSkinControl("Play",point(custom ? 185.f : 105.f,240),scale)) {
+    if (custom && DrawSkinControl("Browse",point(24,278),scale)) mythicBrowse = true;
+    if (DrawSkinControl("Play",point(custom ? 185.f : 105.f,278),scale)) {
         mythicPreview = static_cast<int>(draftMythicOptions.sound);
         mythicPreviewVolume = draftMythicOptions.volume;
     }
-    if (Ui::IsItemHovered()) QueueHelp("Previews the selected sound and volume.",point(355,240),scale,origin.x);
-    if (!mythicMessage.empty()) BodyText(draw,mythicMessage.c_str(),point(34,283),scale,GoldColor,282*scale.x);
-    else if (custom) BodyText(draw,CustomSoundMessage(mythicCustomStatus),point(24,283),UiPoint(scale.x*.85f,scale.y*.85f),GoldColor,302*scale.x);
-    else if (mythicFailed) BodyText(draw,"Sound unavailable. Restart the game.",point(34,283),scale,GoldColor,282*scale.x);
-    if (DrawSkinControl("Okay",point(24,308),scale,&okayRect)) {
+    if (Ui::IsItemHovered()) QueueHelp("Previews the selected sound and volume.",point(355,278),scale,origin.x);
+    if (!mythicMessage.empty()) BodyText(draw,mythicMessage.c_str(),point(34,321),scale,GoldColor,282*scale.x);
+    else if (custom) BodyText(draw,CustomSoundMessage(mythicCustomStatus),point(24,321),UiPoint(scale.x*.85f,scale.y*.85f),GoldColor,302*scale.x);
+    else if (mythicFailed) BodyText(draw,"Sound unavailable. Restart the game.",point(34,321),scale,GoldColor,282*scale.x);
+    if (DrawSkinControl("Okay",point(24,346),scale,&okayRect)) {
         if (SaveMythicSettings()) { mythicOptions=draftMythicOptions; activeAddon=nullptr; }
         else mythicMessage="Settings could not be saved.";
     }
-    if (DrawSkinControl("Back",point(185,308),scale,&cancelRect)) activeAddon=nullptr;
+    if (DrawSkinControl("Back",point(185,346),scale,&cancelRect)) activeAddon=nullptr;
 }
 
 static void DrawCharacterSheetSettings(UiPoint origin,UiPoint scale) {
@@ -1830,12 +1832,14 @@ static void DrawBankPagePicker() {
 #include "controller_ui.h"
 #include "enhanced_settings_ui.h"
 
-static const char* CursorColorNames[] = {"Red","Yellow","White","Green","Cyan","Blue","Purple","Pink"};
+static const char* CursorColorNames[] = {"Red","Yellow","White","Green","Cyan","Blue","Purple","Pink","Rainbow"};
 static const UiColor CursorColors[] = {UI_COLOR(255,32,32,255),UI_COLOR(255,220,32,255),UI_COLOR(255,255,255,255),UI_COLOR(64,255,64,255),UI_COLOR(32,230,255,255),UI_COLOR(80,128,255,255),UI_COLOR(180,80,255,255),UI_COLOR(255,80,180,255)};
 
-static void DrawCursorRing(UiPoint center,float radius,float scale,UiColor color,bool preview=false) {
+static void DrawCursorRing(UiPoint center,float radius,float scale,unsigned choice,bool preview=false) {
+    if (choice>=CursorColorCount) return;
     auto& ring = preview ? previewCursorRing : combatCursorRing;
-    ring.Draw(graphics,Ui::GetForegroundDrawList(),center,radius,scale,color);
+    const bool rainbow=choice==CursorRainbowColor;
+    ring.Draw(graphics,Ui::GetForegroundDrawList(),center,radius,scale,rainbow ? UI_WHITE : CursorColors[choice],rainbow);
 }
 
 static void DrawCursorSettings(UiPoint origin,UiPoint scale) {
@@ -1846,9 +1850,9 @@ static void DrawCursorSettings(UiPoint origin,UiPoint scale) {
     const auto size = std::to_string(draftCursorOptions.radius);
     const int step = OptionRow("Ring size:",size.c_str(),point(10,96),scale,"Radius in game UI pixels.",point(355,96),origin.x);
     if (step) draftCursorOptions.radius = static_cast<unsigned>(std::clamp(static_cast<int>(draftCursorOptions.radius) + step * 2,12,40));
-    const int shade = OptionRow("Color:",CursorColorNames[draftCursorOptions.color],point(10,134),scale,"Ring color.",point(355,134),origin.x);
-    if (shade) draftCursorOptions.color = (draftCursorOptions.color + (shade > 0 ? 1 : 7)) % 8;
-    DrawCursorRing(point(75,214),draftCursorOptions.radius * scale.y,scale.y,CursorColors[draftCursorOptions.color],true);
+    const int shade = OptionRow("Color:",CursorColorNames[draftCursorOptions.color],point(10,134),scale,"Choose a solid color or a rainbow ring.",point(355,134),origin.x);
+    if (shade) draftCursorOptions.color = (draftCursorOptions.color + (shade > 0 ? 1 : CursorColorCount-1)) % CursorColorCount;
+    DrawCursorRing(point(75,214),draftCursorOptions.radius * scale.y,scale.y,draftCursorOptions.color,true);
     BodyText(draw,"Hides after 10 seconds without damage dealt or received.",point(130,183),UiPoint(scale.x*.85f,scale.y*.85f),BodyColor,185 * scale.x);
     if (!cursorMessage.empty()) BodyText(draw,cursorMessage.c_str(),point(34,265),scale,GoldColor,282 * scale.x);
     if (DrawSkinControl("Okay",point(24,290),scale,&okayRect)) {
@@ -2246,9 +2250,9 @@ static void DiscoverAddons(const std::filesystem::path& root) {
     if (addonRegistry.Cooldowns()) registeredAddons.push_back({"cooldown-timers","Cooldown Timers","Skill cooldowns and Buff / Curse durations.",OpenCooldownSettings,DrawCooldownSettings,nullptr});
     if (addonRegistry.Nameplates()) registeredAddons.push_back({"nameplates","Nameplates","Player names, HP / Mana and Posse; pet HP bars.",OpenNameplateSettings,DrawNameplateSettings,nullptr});
     if (addonRegistry.CharacterSheet()) registeredAddons.push_back({"better-character-sheet","Better Character Sheet","Shows Weapon Crit, Magic Crit, Stun Resist and Movement.",OpenCharacterSheetSettings,DrawCharacterSheetSettings,nullptr});
-    if (addonRegistry.MythicSounds()) registeredAddons.push_back({"mythic-drop-sounds","Mythic Drop Sounds","Sound and chat alerts for Mythic drops.",OpenMythicSettings,DrawMythicSettings,nullptr});
+    if (addonRegistry.MythicSounds()) registeredAddons.push_back({"mythic-drop-sounds","Mythic Drop Sounds","Drop alerts and boss chest info.",OpenMythicSettings,DrawMythicSettings,nullptr});
     if (addonRegistry.WishingWell()) registeredAddons.push_back({"wishing-well-tracker","Wishing Well Tracker","Cooldown and login reminders with separate sounds.",OpenWellSettings,DrawWellSettings,nullptr});
-    if (addonRegistry.CombatCursor()) registeredAddons.push_back({"cursor-circle","Cursor Circle","Highlights the cursor during combat.",OpenCursorSettings,DrawCursorSettings,nullptr});
+    if (addonRegistry.CombatCursor()) registeredAddons.push_back({"cursor-circle","Cursor Circle","Combat cursor ring with solid or rainbow colors.",OpenCursorSettings,DrawCursorSettings,nullptr});
     if (addonRegistry.MoveEverything()) registeredAddons.push_back({"moveeverything","Moveeverything","Move player, party, target, chat, minimap and buff/curse panels.",OpenMoveSettings,DrawMoveSettings,nullptr});
     if (addonRegistry.Loadouts()) registeredAddons.push_back({"loadouts","Loadouts & Sorting","Gear and hotbar loadouts, Inventory and selected bank page sorting.",OpenLoadoutSettings,DrawLoadoutSettings,nullptr});
     if (addonRegistry.ControllerEnabled()) registeredAddons.push_back({"controller","Controller","Gamepad movement, combat, consumables and menus.",OpenControllerSettings,DrawControllerSettings,nullptr});
@@ -2333,7 +2337,7 @@ static void DrawAddons() {
     }
     if (addonsOpen) {
         const float listHeight = std::clamp(static_cast<float>(registeredAddons.size())*48,48.0f,192.0f);
-        const float height = activeAddon ? (activeAddon->advanced || activeAddon->open == OpenControllerSettings ? 506.0f : activeAddon->open == OpenWellSettings ? 518.0f : activeAddon->open == OpenEnhancedSettings ? 457.0f : activeAddon->open == OpenDamageSettings ? 390.0f : activeAddon->open == OpenNameplateSettings && !nameplatePage ? 340.0f : activeAddon->open == OpenMythicSettings ? 365.0f : activeAddon->open == OpenLoadoutSettings ? 342.0f : activeAddon->open == OpenCursorSettings ? 347.0f : 289.0f) : 125+listHeight;
+        const float height = activeAddon ? (activeAddon->advanced || activeAddon->open == OpenControllerSettings ? 506.0f : activeAddon->open == OpenWellSettings ? 518.0f : activeAddon->open == OpenEnhancedSettings ? 457.0f : activeAddon->open == OpenDamageSettings ? 390.0f : activeAddon->open == OpenNameplateSettings && !nameplatePage ? 340.0f : activeAddon->open == OpenMythicSettings ? 403.0f : activeAddon->open == OpenLoadoutSettings ? 342.0f : activeAddon->open == OpenCursorSettings ? 347.0f : 289.0f) : 125+listHeight;
         const bool controllerPanel=activeAddon && activeAddon->open==OpenControllerSettings;
         const auto preferred=controllerPanel ? UiPoint(std::max(buttonScale.x,1.5f),std::max(buttonScale.y,1.5f)) : buttonScale;
         const UiPoint scale = FitScale(preferred,UiPoint(350,height));
@@ -2578,7 +2582,7 @@ extern "C" void __cdecl MeterOverlayEndFrame() {
         const bool showCursor = CombatCursorPosition(cursorCenter);
         if (graphics && worldVisible && (moveEditing || showCursor) && SUCCEEDED(graphics->TestCooperativeLevel()) && SUCCEEDED(graphics->BeginScene())) {
             DrawMoveEditor();
-            if (showCursor) { const float scale = GameScale().y; DrawCursorRing(cursorCenter,cursorOptions.radius*scale,scale,CursorColors[cursorOptions.color]); }
+            if (showCursor) { const float scale = GameScale().y; DrawCursorRing(cursorCenter,cursorOptions.radius*scale,scale,cursorOptions.color); }
             Ui::Flush();
             graphics->EndScene();
         }
@@ -2723,6 +2727,7 @@ extern "C" int __cdecl MeterOverlayMythicSettings(MythicSettings* output,bool fa
     *output = mythicOptions;
     output->enabled = output->enabled && addonRegistry.MythicSounds();
     output->announcements = output->announcements && addonRegistry.MythicSounds();
+    output->bossChestInfo = output->bossChestInfo && addonRegistry.MythicSounds();
     const int preview = addonRegistry.MythicSounds() && (!failed || mythicPreview == int(MythicCustomSound)) ? mythicPreview : -1;
     if (browse) *browse = addonRegistry.MythicSounds() && mythicBrowse && activeAddon && activeAddon->open == OpenMythicSettings && draftMythicOptions.sound == MythicCustomSound ? gameWindow : nullptr;
     mythicBrowse = false;

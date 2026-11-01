@@ -37,6 +37,7 @@ inline const char* CustomSoundMessage(CustomSoundStatus status) {
 struct MythicSettings {
     bool enabled = true;
     bool announcements = true;
+    bool bossChestInfo = true;
     unsigned sound = 0;
     unsigned volume = 100;
     void Load(std::istream& input) {
@@ -44,12 +45,16 @@ struct MythicSettings {
         if (input >> on >> choice && on <= 1) {
             enabled = on != 0;
             announcements = enabled;
+            bossChestInfo = announcements;
             sound = choice < std::size(MythicSounds) ? choice : 0;
             unsigned messages = 0;
             if (input >> messages && messages <= 1) {
                 announcements = messages != 0;
+                bossChestInfo = announcements;
                 unsigned loudness = 100;
                 if (input >> loudness && loudness <= 100) volume = loudness;
+                unsigned chestInfo = 1;
+                if (input >> chestInfo && chestInfo <= 1) bossChestInfo = chestInfo != 0;
             }
         }
     }

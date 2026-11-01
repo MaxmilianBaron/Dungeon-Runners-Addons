@@ -1,6 +1,7 @@
 #pragma once
 #include "windows_compat.h"
 #include "AardvarkUI/ui.h"
+#include "cursor_rainbow.h"
 #include <algorithm>
 #include <cmath>
 
@@ -11,6 +12,7 @@ class CursorRing {
     UiColor color = 0;
     uint64_t retryAt = 0;
     unsigned side = 0;
+    bool rainbow = false;
 public:
     CursorRing() = default;
     CursorRing(const CursorRing&) = delete;
@@ -18,18 +20,18 @@ public:
     ~CursorRing() { Reset(); }
     void Reset() {
         if (texture) texture->Release();
-        texture = nullptr; owner = nullptr; radius = scale = extent = 0; color = 0; retryAt = 0; side = 0;
+        texture = nullptr; owner = nullptr; radius = scale = extent = 0; color = 0; retryAt = 0; side = 0; rainbow = false;
     }
-    void Draw(IDirect3DDevice9* device,UiDrawList* draw,UiPoint center,float nextRadius,float nextScale,UiColor nextColor) {
+    void Draw(IDirect3DDevice9* device,UiDrawList* draw,UiPoint center,float nextRadius,float nextScale,UiColor nextColor,bool nextRainbow=false) {
         if (!device || !draw || !std::isfinite(center.x) || !std::isfinite(center.y) || !std::isfinite(nextRadius) || !std::isfinite(nextScale) ||
             nextRadius <= 0 || nextScale <= 0 || !(nextColor >> 24)) return;
         const float nextExtent = std::ceil(nextRadius + 2.25f * nextScale + 1);
         if (!std::isfinite(nextExtent) || nextExtent > 1024) return;
-        const bool same = owner == device && radius == nextRadius && scale == nextScale && color == nextColor;
+        const bool same = owner == device && radius == nextRadius && scale == nextScale && color == nextColor && rainbow == nextRainbow;
         if (!same || !texture) {
             const auto now = WindowsCompat::Milliseconds();
             if (same && now < retryAt) return;
-            Reset(); owner = device; radius = nextRadius; scale = nextScale; color = nextColor; extent = nextExtent; retryAt = now + 1000;
+            Reset(); owner = device; radius = nextRadius; scale = nextScale; color = nextColor; rainbow = nextRainbow; extent = nextExtent; retryAt = now + 1000;
             for (side = 8; side < unsigned(2 * extent); side *= 2) {}
             UiTexture next = nullptr;
             if (FAILED(device->CreateTexture(side,side,1,0,D3DFMT_A8R8G8B8,D3DPOOL_MANAGED,&next,nullptr))) return;
@@ -44,8 +46,9 @@ public:
                     const float inner = std::clamp(1.1f * scale + .5f - distance,0.f,1.f) * ((color >> 24) / 255.f);
                     const float alpha = inner + outer * (1 - inner);
                     const float tint = alpha > 0 ? inner / alpha : 0;
-                    row[x] = UI_COLOR(unsigned(((color >> 16) & 255) * tint + .5f),unsigned(((color >> 8) & 255) * tint + .5f),
-                        unsigned((color & 255) * tint + .5f),unsigned(alpha * 255 + .5f));
+                    const auto pixelColor=rainbow && inner>0 ? CursorRainbowTint(dx,dy) : color;
+                    row[x] = UI_COLOR(unsigned(((pixelColor >> 16) & 255) * tint + .5f),unsigned(((pixelColor >> 8) & 255) * tint + .5f),
+                        unsigned((pixelColor & 255) * tint + .5f),unsigned(alpha * 255 + .5f));
                 }
             }
             const auto unlocked = next->UnlockRect(0);
