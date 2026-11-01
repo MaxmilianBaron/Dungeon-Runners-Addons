@@ -1,0 +1,3 @@
+LIBRARY Addons
+EXPORTS
+    DungeonRunnersAddonsInitialize=_DungeonRunnersAddonsInitialize@4
