@@ -5,6 +5,7 @@ enum class BossChestPresence { Unknown, NotDetected, Found };
 
 inline bool BossChestInfoZone(std::string_view key) {
     if (key.substr(0,7)!="dungeon" || key.substr(7,2)=="00") return false;
+    if (key=="dungeon15_level08_boss") return false;
     const auto at=key.find("_boss");
     return at!=std::string_view::npos && (key.substr(at)=="_boss" || key.substr(at)=="_boss_loot");
 }

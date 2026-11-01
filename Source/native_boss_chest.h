@@ -24,7 +24,7 @@ template<class Reader> BossChestPresence ReadBossChestPresence(const Reader& r,u
         if (block && (!r.Read(block,length) || length>128)) return BossChestPresence::Unknown;
         const auto name=r.String(entity+0x10,128);
         if (length && name.empty()) return BossChestPresence::Unknown;
-        if (name=="DungeonBossChest" || name=="ChestBoss") { found=true; break; }
+        if (name=="DungeonBossChest") { found=true; break; }
     }
     std::array<uint32_t,3> current{};
     uint32_t currentSeed=0;
