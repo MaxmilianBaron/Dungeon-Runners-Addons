@@ -2,7 +2,7 @@
 #include "windows_compat.h"
 
 static void OpenEnhancedSettings() {
-    draftEnhancedOptions = {lowHpOptions,unbindOptions.enabled,mouseLookEnabled,enhancedZoomEnabled};
+    draftEnhancedOptions = {lowHpOptions,unbindOptions.enabled,mouseLookEnabled,enhancedZoomEnabled,chatTimestampsEnabled};
     enhancedMessage.clear();
     lowHpPreviewUntil = 0;
 }
@@ -28,21 +28,25 @@ static void DrawEnhancedSettings(UiPoint origin,UiPoint scale) {
     const auto intensity = std::to_string(health.intensity) + "%";
     const int opacity = OptionRow("Intensity:",intensity.c_str(),point(10,248),scale,"Opacity at the screen edges. The center stays clear; the warning does not flash.",point(355,248),origin.x);
     if (opacity) health.intensity = unsigned(std::clamp(int(health.intensity) + opacity * 5,10,90));
-    BodyText(draw,"Each option works independently. Mouse look uses the game's camera controls. Preview shows the HP warning for 5 seconds.",point(34,296),UiPoint(scale.x*.85f,scale.y*.85f),BodyColor,280 * scale.x);
-    if (DrawSkinControl("Preview",point(104,362),scale)) lowHpPreviewUntil = WindowsCompat::Milliseconds() + 5000;
-    if (!enhancedMessage.empty()) BodyText(draw,enhancedMessage.c_str(),point(34,409),UiPoint(scale.x*.85f,scale.y*.85f),GoldColor,282 * scale.x);
-    if (DrawSkinControl("Okay",point(24,438),scale,&okayRect)) {
+    if (OptionRow("Chat timestamps:",draftEnhancedOptions.chatTimestamps ? "On" : "Off",point(10,286),scale,
+        chatTimestampsAvailable ? "Adds local time [HH:mm] to new chat messages." : "Unavailable: client chat code differs.",point(355,286),origin.x) && chatTimestampsAvailable)
+        draftEnhancedOptions.chatTimestamps = !draftEnhancedOptions.chatTimestamps;
+    BodyText(draw,"Each option works independently. Mouse look uses the game's camera controls. Preview shows the HP warning for 5 seconds.",point(34,334),UiPoint(scale.x*.85f,scale.y*.85f),BodyColor,280 * scale.x);
+    if (DrawSkinControl("Preview",point(104,400),scale)) lowHpPreviewUntil = WindowsCompat::Milliseconds() + 5000;
+    if (!enhancedMessage.empty()) BodyText(draw,enhancedMessage.c_str(),point(34,447),UiPoint(scale.x*.85f,scale.y*.85f),GoldColor,282 * scale.x);
+    if (DrawSkinControl("Okay",point(24,476),scale,&okayRect)) {
         if (SaveAddonOptions(enhancedSettings,draftEnhancedOptions)) {
             MeterMouseLookRelease();
             lowHpOptions = draftEnhancedOptions.health;
             unbindOptions.enabled = draftEnhancedOptions.unbindLeft;
             mouseLookEnabled = draftEnhancedOptions.mouseLook;
             enhancedZoomEnabled = draftEnhancedOptions.enhancedZoom;
+            chatTimestampsEnabled = draftEnhancedOptions.chatTimestamps;
             lowHpPreviewUntil = 0;
             activeAddon = nullptr;
         } else enhancedMessage = "Settings could not be saved.";
     }
-    if (DrawSkinControl("Back",point(185,438),scale,&cancelRect)) { lowHpPreviewUntil = 0; activeAddon = nullptr; }
+    if (DrawSkinControl("Back",point(185,476),scale,&cancelRect)) { lowHpPreviewUntil = 0; activeAddon = nullptr; }
 }
 
 static void DrawLowHpWarning(uint64_t now) {

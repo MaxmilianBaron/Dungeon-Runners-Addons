@@ -20,6 +20,7 @@
 #include "native_wishing_well.h"
 #include "native_hooks.h"
 #include "native_chat.h"
+#include "native_chat_timestamps.h"
 #include "native_archive.h"
 #include "native_history.h"
 #include "addon_api.h"
@@ -71,6 +72,7 @@ extern "C" bool __cdecl MeterOverlayMouseLookInstalled();
 extern "C" void __cdecl MeterOverlayMouseLookAvailable(bool);
 extern "C" void __cdecl MeterOverlayEnhancedZoomAvailable(bool);
 extern "C" bool __cdecl MeterOverlayEnhancedZoomEnabled();
+extern "C" void __cdecl MeterOverlayChatTimestampsAvailable(bool);
 extern "C" bool __cdecl MeterOverlayMouseLook(HWND*,bool*);
 extern "C" void __cdecl MeterOverlayCursorCombat(uint64_t);
 extern "C" bool __cdecl MeterOverlayBankSettings(const BankSortFrame*,BankSortCommand*,bool*);
@@ -932,6 +934,7 @@ static BOOL CALLBACK InitializeAddon() {
         const NativeReader reader(image,CopyMemoryChecked,LookupLabel);
         const bool mouseLookCompatible = MouseLookProfileMatches(reader,image);
         const bool enhancedZoomCompatible = EnhancedZoomProfileMatches(reader,image);
+        const bool chatTimestampsCompatible = ChatTimestampProfileMatches(reader,image);
         const auto settings = (addon / L"ui.ini").u8string();
         mythicSounds.Configure(directory / L"Addons" / L"MythicDropSounds");
         wishingWell.Configure(directory / L"Addons" / L"WishingWellTracker");
@@ -967,10 +970,13 @@ static BOOL CALLBACK InitializeAddon() {
             MeterOverlayMouseLookAvailable(mouseLookInstalled);
         }
         MeterOverlayEnhancedZoomAvailable(MeterOverlayMouseLookInstalled() && enhancedZoom.Install(reader,image,enhancedZoomCompatible));
+        const bool chatTimestampsInstalled = MeterOverlayMouseLookInstalled() && ChatTimestampNative::Install(image,chatTimestampsCompatible);
+        MeterOverlayChatTimestampsAvailable(chatTimestampsInstalled);
         std::ofstream output(status, std::ios::trunc);
         output << "Addons loaded inside DungeonRunners.exe\nClient SHA256: " << digest << "\nHooks: " << std::size(hooks) << "\nSkill labels: " << std::size(SkillLabels) << "\nZone definitions: " << std::size(DungeonZones) << "\n";
         output << "Mouse look hooks: " << (mouseLookInstalled ? "installed" : "unavailable") << '\n';
         output << "Enhanced zoom hooks: " << (enhancedZoom.Available() ? "installed" : "unavailable") << '\n';
+        output << "Chat timestamps hook: " << (chatTimestampsInstalled ? "installed" : "unavailable") << '\n';
         HMODULE ownModule = nullptr;
         wchar_t ownPath[32768]{};
         if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, reinterpret_cast<LPCWSTR>(&InitializeAddon), &ownModule) && GetModuleFileNameW(ownModule, ownPath, static_cast<DWORD>(std::size(ownPath))))

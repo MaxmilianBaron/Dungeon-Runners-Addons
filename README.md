@@ -32,7 +32,7 @@
 - **Loadouts & Sorting** — Gear and hotbar saves; Inventory and selected bank page sorting.
 - **Leaderboard** — Official PvE rankings and PvP Rating; all time or this week.
 - **Controller** — Xbox/XInput and PS5 DualSense movement, combat and menus, with Xbox or PlayStation button labels. Steam Deck uses the Steam Input Gamepad template.
-- **Enhanced Settings** — Camera, attack controls and low-HP warning.
+- **Enhanced Settings** — Camera, attack controls, low-HP warning and optional local chat timestamps in `[HH:mm]` format.
 
 <details>
 <summary>Mac / Linux setup</summary>

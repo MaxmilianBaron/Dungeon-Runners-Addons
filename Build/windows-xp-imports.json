@@ -219,6 +219,7 @@
       "GetFileType",
       "GetFullPathNameW",
       "GetLastError",
+      "GetLocalTime",
       "GetLocaleInfoW",
       "GetLogicalProcessorInformation",
       "GetModuleFileNameA",

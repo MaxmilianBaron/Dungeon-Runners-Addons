@@ -134,6 +134,7 @@ static std::filesystem::path enhancedSettings;
 static std::string enhancedMessage;
 static bool mouseLookEnabled = false, mouseLookAvailable = false;
 static bool enhancedZoomEnabled = false, enhancedZoomAvailable = false;
+static bool chatTimestampsEnabled = false, chatTimestampsAvailable = false;
 static BankSortFrame bankFrame;
 static BankSortFrame inventoryFrame;
 static unsigned bankAction = 0;
@@ -2262,7 +2263,7 @@ static void DiscoverAddons(const std::filesystem::path& root) {
     if (addonRegistry.MoveEverything()) registeredAddons.push_back({"moveeverything","Moveeverything","Move player, party, target, chat, minimap and buff/curse panels.",OpenMoveSettings,DrawMoveSettings,nullptr});
     if (addonRegistry.Loadouts()) registeredAddons.push_back({"loadouts","Loadouts & Sorting","Gear and hotbar loadouts, Inventory and selected bank page sorting.",OpenLoadoutSettings,DrawLoadoutSettings,nullptr});
     if (addonRegistry.ControllerEnabled()) registeredAddons.push_back({"controller","Controller","Gamepad movement, combat, consumables and menus.",OpenControllerSettings,DrawControllerSettings,nullptr});
-    if (addonRegistry.Enhanced()) registeredAddons.push_back({"enhanced-settings","Enhanced Settings","Camera zoom, mouse look, left-click attacks and low HP warning.",OpenEnhancedSettings,DrawEnhancedSettings,nullptr});
+    if (addonRegistry.Enhanced()) registeredAddons.push_back({"enhanced-settings","Enhanced Settings","Camera zoom, mouse look, left-click attacks, low HP warning and chat timestamps.",OpenEnhancedSettings,DrawEnhancedSettings,nullptr});
     for (const auto& extension:addonRegistry.Extensions()) registeredAddons.push_back({extension.id,extension.name,extension.description,OpenExtensionSettings,DrawExtensionSettings,&extension,addonRegistry.Settings(extension)});
 }
 
@@ -2343,7 +2344,7 @@ static void DrawAddons() {
     }
     if (addonsOpen) {
         const float listHeight = std::clamp(static_cast<float>(registeredAddons.size())*48,48.0f,192.0f);
-        const float height = activeAddon ? (activeAddon->advanced || activeAddon->open == OpenControllerSettings ? 506.0f : activeAddon->open == OpenWellSettings ? 518.0f : activeAddon->open == OpenEnhancedSettings ? 495.0f : activeAddon->open == OpenDamageSettings ? 390.0f : activeAddon->open == OpenNameplateSettings && !nameplatePage ? 340.0f : activeAddon->open == OpenMythicSettings ? 403.0f : activeAddon->open == OpenLoadoutSettings ? 342.0f : activeAddon->open == OpenCursorSettings ? 347.0f : 289.0f) : 125+listHeight;
+        const float height = activeAddon ? (activeAddon->advanced || activeAddon->open == OpenControllerSettings ? 506.0f : activeAddon->open == OpenWellSettings ? 518.0f : activeAddon->open == OpenEnhancedSettings ? 533.0f : activeAddon->open == OpenDamageSettings ? 390.0f : activeAddon->open == OpenNameplateSettings && !nameplatePage ? 340.0f : activeAddon->open == OpenMythicSettings ? 403.0f : activeAddon->open == OpenLoadoutSettings ? 342.0f : activeAddon->open == OpenCursorSettings ? 347.0f : 289.0f) : 125+listHeight;
         const bool controllerPanel=activeAddon && activeAddon->open==OpenControllerSettings;
         const auto preferred=controllerPanel ? UiPoint(std::max(buttonScale.x,1.5f),std::max(buttonScale.y,1.5f)) : buttonScale;
         const UiPoint scale = FitScale(preferred,UiPoint(350,height));
@@ -2378,6 +2379,7 @@ extern "C" __declspec(dllexport) int __cdecl MeterOverlayStart(const char* iniFi
     unbindOptions.enabled = enhanced.unbindLeft; unbindAvailable = false;
     mouseLookEnabled = enhanced.mouseLook; mouseLookAvailable = false;
     enhancedZoomEnabled = enhanced.enhancedZoom; enhancedZoomAvailable = false;
+    chatTimestampsEnabled = enhanced.chatTimestamps; chatTimestampsAvailable = false;
     controllerSettings=addonsDirectory/L"Controller"/L"settings.ini";
     controllerOptions={}; controllerStatus={};
     { std::ifstream input(controllerSettings); controllerOptions.Load(input); }
@@ -2620,6 +2622,8 @@ extern "C" bool __cdecl MeterOverlayMouseLookInstalled() { Lock lock; return add
 extern "C" void __cdecl MeterOverlayMouseLookAvailable(bool value) { Lock lock; mouseLookAvailable = value; }
 extern "C" void __cdecl MeterOverlayEnhancedZoomAvailable(bool value) { Lock lock; enhancedZoomAvailable = value; }
 extern "C" bool __cdecl MeterOverlayEnhancedZoomEnabled() { Lock lock; return addonRegistry.Enhanced() && enhancedZoomAvailable && enhancedZoomEnabled && !shuttingDown; }
+extern "C" void __cdecl MeterOverlayChatTimestampsAvailable(bool value) { Lock lock; chatTimestampsAvailable = value; }
+extern "C" bool __cdecl MeterOverlayChatTimestampsEnabled() { Lock lock; return addonRegistry.Enhanced() && chatTimestampsAvailable && chatTimestampsEnabled && !shuttingDown; }
 extern "C" bool __cdecl MeterOverlayMouseLook(HWND* window,bool* blocked) {
     Lock lock;
     if (window) *window = gameWindow;
