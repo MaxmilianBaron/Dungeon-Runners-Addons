@@ -275,9 +275,14 @@ function Get-AddonSelection([string]$Game) {
     return ,$paths
 }
 
+function Assert-GraphicsReady([string]$Game) {
+    if (Test-Path -LiteralPath (Get-ChildPath $Game '.dr-client/graphics-transaction.json')) { throw 'Open the launcher and select Repair to finish the interrupted graphics change.' }
+}
+
 function Install-Addons([string]$Game,[string]$Package) {
     $Game = [IO.Path]::GetFullPath($Game)
     $Package = [IO.Path]::GetFullPath($Package)
+    Assert-GraphicsReady $Game
     if (Get-Process -Name DungeonRunners,DungeonRunners118 -ErrorAction SilentlyContinue) { throw 'Close Dungeon Runners before installing or updating addons.' }
     $manifest = Get-Content -LiteralPath (Join-Path $Package 'package.json') -Raw | ConvertFrom-Json
     if ($manifest.schema -ne 1 -or @($manifest.files).Count -lt 4 -or @($manifest.files).Count -gt 64) { throw 'Invalid release package.' }
@@ -339,8 +344,10 @@ function Install-Addons([string]$Game,[string]$Package) {
         -not (Test-Path -LiteralPath $destination) -or (Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash.ToLowerInvariant() -ne $_.sha256
     })
     if (-not $needed.Count) {
+        Assert-GraphicsReady $Game
         return ('Version V'+$manifest.version+' is already installed.')
     }
+    Assert-GraphicsReady $Game
     New-Item -ItemType Directory -Path $backupRoot,$pendingRoot -Force | Out-Null
     $changed = [Collections.Generic.List[object]]::new()
     try {
@@ -359,6 +366,7 @@ function Install-Addons([string]$Game,[string]$Package) {
             else { Copy-Item -LiteralPath (Get-ChildPath $Package $file.path) -Destination $pending }
             if ((Get-FileHash -LiteralPath $pending).Hash.ToLowerInvariant() -ne $expected) { throw 'An installation file changed while being staged.' }
             if (Get-Process -Name DungeonRunners,DungeonRunners118 -ErrorAction SilentlyContinue) { throw 'Close Dungeon Runners before installing or updating addons.' }
+            Assert-GraphicsReady $Game
             if ($file.path -eq 'd3d9.dll' -and $loaderHash -and (Get-FileHash -LiteralPath $loader).Hash.ToLowerInvariant() -ne $loaderHash) { throw 'The existing d3d9.dll changed during installation.' }
             $existed = Test-Path -LiteralPath $destination
             if ($existed -and $file.path -in $licenseRelatives) {

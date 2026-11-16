@@ -501,10 +501,17 @@ def prune_backups(game):
         return
 
 
+def graphics_ready(game):
+    require(not child(game, '.dr-client/graphics-transaction.json').exists(),
+            'Open the launcher and select Repair to finish the interrupted graphics change.')
+
+
 def install(game, package, manifest, check_running=game_stopped):
+    graphics_ready(game)
     files = validate_manifest(manifest)
     validate_client(game, manifest)
     check_running()
+    graphics_ready(game)
     for item in files:
         source, target = child(package, item['path']), child(game, item['path'])
         require(source.is_file() and source.stat().st_size <= LIMIT and file_hash(source) == item['sha256'],
@@ -548,8 +555,10 @@ def install(game, package, manifest, check_running=game_stopped):
     ordered = [f for f in ordered if not (f['path'].endswith('/addon.ini') and child(game, f['path']).is_file())]
     if all(child(game, f['path']).is_file() and
             file_hash(child(game, f['path'])) == f['sha256'] for f in ordered):
+        graphics_ready(game)
         child(game, 'Addons/Update.sh').chmod(0o755)
         return 0
+    graphics_ready(game)
     backup.mkdir(parents=True)
     pending.mkdir(parents=True)
     changed = []
@@ -562,6 +571,7 @@ def install(game, package, manifest, check_running=game_stopped):
                 continue
             if target.is_file() and file_hash(target) == item['sha256']:
                 if relative.endswith('.sh'):
+                    graphics_ready(game)
                     target.chmod(0o755)
                 continue
             staged = child(pending, relative)
@@ -582,6 +592,7 @@ def install(game, package, manifest, check_running=game_stopped):
                 saved.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(target, saved)
             check_running()
+            graphics_ready(game)
             if relative == 'd3d9.dll' and loader_hash:
                 require(file_hash(loader) == loader_hash, 'The existing d3d9.dll changed during installation.')
             if relative in LICENSE_PATHS:
@@ -595,6 +606,7 @@ def install(game, package, manifest, check_running=game_stopped):
             os.replace(staged, target)
             changed.append((relative, exists))
         check_running()
+        graphics_ready(game)
         for item in ordered:
             if item['path'] in LICENSE_PATHS and (item['path'], False) not in changed:
                 require(child(game, item['path']).is_file(), 'The addon license is missing.')
@@ -670,6 +682,7 @@ def asset_bytes(release, name, checksum=None):
 
 def update(game, release=None, receive=asset_bytes, check_running=game_stopped, manifest=None):
     check_running()
+    graphics_ready(game)
     release = release or release_metadata()
     manifest = manifest or json.loads(receive(release, MANIFEST_ASSET))
     files = validate_manifest(manifest, release['tag_name'][1:])

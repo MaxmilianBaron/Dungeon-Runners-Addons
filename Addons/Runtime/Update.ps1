@@ -64,6 +64,7 @@ function Receive-UpdateAsset($Release,[string]$Name,[string]$Destination,[string
 }
 
 function Invoke-AddonUpdate([string]$Game) {
+    if (Test-Path -LiteralPath (Get-UpdatePath $Game '.dr-client/graphics-transaction.json')) { throw 'Open the launcher and select Repair to finish the interrupted graphics change.' }
     if (Get-Process -Name DungeonRunners,DungeonRunners118 -ErrorAction SilentlyContinue) { throw 'Close Dungeon Runners before updating addons.' }
     $Game = [IO.Path]::GetFullPath($Game)
     $exe = Get-UpdatePath $Game 'DungeonRunners.exe'

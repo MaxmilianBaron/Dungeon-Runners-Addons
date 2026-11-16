@@ -355,11 +355,18 @@ function pruneBackups(game) {
     } catch (error) { }
 }
 
+function graphicsReady(game) {
+    requireValue(!info(safePath(game, '.dr-client/graphics-transaction.json')),
+                 'Open the launcher and select Repair to finish the interrupted graphics change.');
+}
+
 function install(game, packageRoot, manifest, checkRunning) {
+    graphicsReady(game);
     checkRunning = checkRunning || gameStopped;
     var files = manifestFiles(manifest);
     validateClient(game, manifest, false);
     checkRunning();
+    graphicsReady(game);
     files.forEach(function(file) {
         var target = safePath(game, file.path), source = safePath(packageRoot, file.path);
         requireValue(hash(read(source, limit)) === file.sha256, 'Damaged installation file: ' + file.path);
@@ -400,8 +407,9 @@ function install(game, packageRoot, manifest, checkRunning) {
     }
     ordered = ordered.filter(function(f) { return !f.path.endsWith('/addon.ini') || !regular(safePath(game, f.path)); });
     var pending = ordered.filter(function(file) { var path = safePath(game, file.path); return !regular(path) || fileHash(path) !== file.sha256; });
-    if (!pending.length) { chmod(safePath(game, 'Addons/Update.command'), true); return 0; }
+    if (!pending.length) { graphicsReady(game); chmod(safePath(game, 'Addons/Update.command'), true); return 0; }
     var backup = safePath(game, 'Addons/Backups/' + new Date().toISOString().replace(/[^0-9]/g, '') + '-' + ObjC.unwrap($.NSUUID.UUID.UUIDString));
+    graphicsReady(game);
     mkdir(backup);
     var changed = [];
     try {
@@ -413,6 +421,7 @@ function install(game, packageRoot, manifest, checkRunning) {
             }
             if (existed) { write(saved, read(target, limit)); chmod(saved, file.path.endsWith('.command')); }
             checkRunning();
+            graphicsReady(game);
             var data = localFiles[file.path] || read(safePath(packageRoot, file.path), limit);
             requireValue(hash(data) === file.sha256, 'An installation file changed while being staged.');
             if (file.path === 'd3d9.dll' && loaderHash) {
@@ -436,6 +445,7 @@ function install(game, packageRoot, manifest, checkRunning) {
             chmod(target, file.path.endsWith('.command'));
         });
         checkRunning();
+        graphicsReady(game);
         ordered.forEach(function(file) {
             if (licensePaths.indexOf(file.path) >= 0 && !changed.some(function(item) { return item.path === file.path; })) {
                 requireValue(regular(safePath(game, file.path)), 'The addon license is missing.');
@@ -509,6 +519,7 @@ function update(game, release, receive, checkRunning) {
     checkRunning = checkRunning || gameStopped;
     receive = receive || assetBytes;
     checkRunning();
+    graphicsReady(game);
     release = release || releaseMetadata();
     var manifest = JSON.parse(dataText(receive(release, manifestAsset)));
     var files = manifestFiles(manifest, release.tag_name.slice(1));
