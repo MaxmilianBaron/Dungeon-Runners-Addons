@@ -18,6 +18,8 @@
 
 **Update** — For existing installations. Close the game → run the included `Update` file in the game's `Addons` folder. Updates installed addons and adds new ones, preserving settings and history.
 
+**Graphics compatibility (Windows 7+)** — The launcher selects graphics automatically for this PC. Choose `Graphics` → `dgVoodoo` or `Standard` to override it. Addons remain available, and updates preserve the renderer and its settings.
+
 **Settings** — `ESC` → `Addons`
 
 - **Damage Meter** — DPS, damage, skills and combat history.
