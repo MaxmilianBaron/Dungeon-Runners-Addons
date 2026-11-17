@@ -98,14 +98,17 @@ public:
         return {key|0x8000000000000000ull,name};
     }
     bool IsGold(uintptr_t item) const { return item && Pointer(item) == image + 0x48f690; }
-    bool InWorld() const {
+    bool InWorld(uint32_t* character = nullptr) const {
+        if (character) *character = 0;
         const uintptr_t ui = Pointer(image + 0x5314b0);
         uint32_t flags = 0, id = 0;
         if (!ui || !Read(ui + 0xb4,flags) || !(flags & 8)) return false;
         const uintptr_t zone = Pointer(ui + 0x1b4);
         if (!zone || Pointer(zone) != image + 0x4ab1b8 || !Pointer(zone + 0xf0)) return false;
         const uintptr_t player = Pointer(zone + 0xf8);
-        return player && Pointer(player) == image + 0x49b468 && Pointer(player + 0x80) && Read(player + 0x98,id) && id;
+        if (!player || Pointer(player) != image + 0x49b468 || !Pointer(player + 0x80) || !Read(player + 0x98,id) || !id) return false;
+        if (character) *character = id;
+        return true;
     }
     uintptr_t UiForeground() const {
         const uintptr_t ui = Pointer(image + 0x5314b0);
@@ -197,13 +200,17 @@ public:
         if (!fallback.empty()) return {fallback, fallback};
         return {"unattributed", "Unattributed effect"};
     }
-    bool LocalAvatarAlive() const {
+    uintptr_t LocalAvatar() const {
         const auto ui = Pointer(image + 0x5314b0);
         const auto player = Pointer(Pointer(ui + 0x1b4) + 0xf8);
         const auto avatar = Pointer(player + 0xb0);
-        int32_t hp = 0;
         return player && Pointer(player) == image + 0x49b468 && avatar && Pointer(avatar) == image + 0x46de00 &&
-            Pointer(avatar + 0x14) == player && Read(avatar + 0x2f0,hp) && hp > 0;
+            Pointer(avatar + 0x14) == player ? avatar : 0;
+    }
+    bool LocalAvatarAlive() const {
+        const auto avatar = LocalAvatar();
+        int32_t hp = 0;
+        return avatar && Read(avatar + 0x2f0,hp) && hp > 0;
     }
     LocalHealthFrame LocalHealth(uint64_t now) const {
         LocalHealthFrame result;

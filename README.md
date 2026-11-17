@@ -22,7 +22,7 @@
 
 **Settings** — `ESC` → `Addons`
 
-- **Damage Meter** — DPS, damage, skills and combat history.
+- **Damage Meter** — DPS, damage, melee and ranged accuracy, skills and combat history.
 - **Hide Gold Labels** — Hides gold labels without affecting pickup.
 - **Cooldown Timers** — Skill, buff and curse timers.
 - **Nameplates** — Player and pet health, mana and names.

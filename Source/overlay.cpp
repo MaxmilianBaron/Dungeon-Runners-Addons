@@ -225,6 +225,7 @@ static bool shuttingDown = false;
 static uint32_t selectedCharacter = 0;
 static uint64_t selectedPet = 0;
 static unsigned mode = 0;
+static bool accuracyView = false;
 static unsigned direction = 0;
 static bool detailByActor = true;
 static uint64_t detailActor = 0;
@@ -263,7 +264,7 @@ static void OpenReport(uint64_t dungeon = 0);
 static void SavePreferences() {
     if (settingsFile.empty()) return;
     std::ofstream output(std::filesystem::u8path(settingsFile + ".prefs"), std::ios::trunc);
-    output << (visible ? 1 : 0) << ' ' << mode << ' ' << (measurementEnabled ? 1 : 0) << ' ' << direction << ' ' << meterScalePercent << '\n';
+    output << (visible ? 1 : 0) << ' ' << mode << ' ' << (measurementEnabled ? 1 : 0) << ' ' << direction << ' ' << meterScalePercent << ' ' << (accuracyView ? 1 : 0) << '\n';
 }
 
 static bool SaveHotkey() {
@@ -793,7 +794,7 @@ static UiPoint MoveSurface(UiPoint size, UiPoint scale, float titleWidth, float 
     return position;
 }
 
-static void ResizePanel(UiPoint origin,UiPoint size,UiPoint scale,unsigned rows,float rowHeight,float headerHeight,float footer) {
+static void ResizePanel(UiPoint origin,UiPoint size,UiPoint scale,unsigned rows,float rowHeight,float headerHeight,float footer,float rowExtra) {
     const UiPoint corner(std::max(8.0f,12*scale.x),std::max(8.0f,12*scale.y));
     const UiPoint edge(std::max(5.0f,7*scale.x),std::max(5.0f,7*scale.y));
     const UiInput& io = Ui::GetIO();
@@ -825,7 +826,7 @@ static void ResizePanel(UiPoint origin,UiPoint size,UiPoint scale,unsigned rows,
             const float roomX = left ? resizeStartOrigin.x+resizeStartSize.x : io.DisplaySize.x-resizeStartOrigin.x;
             const float roomY = top ? resizeStartOrigin.y+resizeStartSize.y : io.DisplaySize.y-resizeStartOrigin.y;
             const float widthLimit = std::max(240.0f,std::min(1200.0f,roomX/scale.x));
-            const float rowLimit = std::max(18.0f,std::min(160.0f,(roomY/scale.y-headerHeight-footer)/rows));
+            const float rowLimit = std::max(18.0f,std::min(160.0f,(roomY/scale.y-headerHeight-footer)/rows-rowExtra));
             UiPoint nextPosition = resizeStartOrigin;
             if (axes & 1) {
                 const float delta = (io.MousePos.x-resizeStartMouse.x)*(left ? -1.0f : 1.0f);
@@ -835,9 +836,9 @@ static void ResizePanel(UiPoint origin,UiPoint size,UiPoint scale,unsigned rows,
             }
             if (axes & 2) {
                 const float delta = (io.MousePos.y-resizeStartMouse.y)*(top ? -1.0f : 1.0f);
-                const float next = std::clamp(resizeStartRowHeight+delta/(scale.y*resizeRows),18.0f,rowLimit);
+                const float next = std::clamp(resizeStartRowHeight-rowExtra+delta/(scale.y*resizeRows),18.0f,rowLimit);
                 if (panelRowHeight != next) { panelRowHeight = next; panelSizeDirty = true; }
-                if (top) nextPosition.y += resizeStartSize.y-(headerHeight+next*rows+footer)*scale.y;
+                if (top) nextPosition.y += resizeStartSize.y-(headerHeight+(next+rowExtra)*rows+footer)*scale.y;
             }
             if (left || top) { panelNextPosition = nextPosition; panelPositionPending = true; }
         }
@@ -1111,7 +1112,7 @@ static void DrawDetails(const MeterView& view,const char* period=nullptr) {
     else if (back) BackFromDetails();
 }
 
-static void DrawPanelActions(UiPoint origin,UiPoint scale,float width,unsigned columns) {
+static void DrawPanelActions(UiPoint origin,UiPoint scale,float width,unsigned columns,bool showAccuracy) {
     auto* draw = Ui::GetWindowDrawList();
     const float contentWidth = width-30;
     const float buttonWidth = (contentWidth-4*(columns-1))/columns;
@@ -1129,7 +1130,9 @@ static void DrawPanelActions(UiPoint origin,UiPoint scale,float width,unsigned c
     };
     if (option("History",0,historyButtonRect,"Last 20 dungeon runs, including the current run. Floors and town visits stay together. Click a run for players and skills.")) { historyOpen=true; historySelected=0; selectedCharacter=0; selectedPet=0; }
     if (option("Report",1,reportButtonRect,"Choose Current, Overall or a saved dungeon and Damage Done or Taken before sending a preview to party chat /g.")) OpenReport();
-    if (option("Reset",2,panelResetRect,"Immediately clears Current and Overall damage totals for all displayed players.")) InterlockedOr(&actions,1);
+    const char* resetHelp = showAccuracy ? "Clears Current and Overall accuracy counts for your character." :
+        "Immediately clears Current and Overall damage totals for all displayed players.";
+    if (option("Reset",2,panelResetRect,resetHelp)) InterlockedOr(&actions,showAccuracy ? MeterResetAccuracy : 1);
     if (option("Hide",3,panelHideRect,"Hides this panel. Measurement continues while enabled. Use your Show / hide shortcut or ESC > Addons > Damage Meter to show it again.")) { visible=false; selectedCharacter=0; selectedPet=0; SavePreferences(); }
     Ui::PopID();
 }
@@ -1158,24 +1161,76 @@ static void DrawWellTimer() {
     Ui::End();
 }
 
+static void DrawAccuracyRows(const std::array<AccuracyCounts,2>& counts,UiPoint origin,UiPoint scale,UiPoint textScale,
+                             float barWidth,float rowHeight,bool available,float panelLeft,float helpRight) {
+    static const char* labels[] = {"Melee","Ranged"};
+    for (unsigned index=0;index<counts.size();++index) {
+        const auto& row = counts[index];
+        const auto position = At(origin,scale,0,index*rowHeight);
+        const UiPoint size(barWidth*scale.x,(rowHeight-2)*scale.y);
+        const bool hovered = available && HoverArea(position,size);
+        auto* draw = Ui::GetWindowDrawList();
+        nativeSkin.Row(draw,position,size,scale,available ? static_cast<float>(row.Rate()) : 0.0f,hovered);
+        const float inset = 10*scale.x, gap = 2*scale.y;
+        const float innerHeight = size.y-10*scale.y;
+        const float lineHeight = std::min(14*textScale.y,available ? (innerHeight-gap)*0.5f : innerHeight);
+        const UiPoint lineScale(lineHeight/14,lineHeight/14);
+        char summary[80]{};
+        float summaryScale = 0.0f;
+        float summaryWidth = 0.0f;
+        if (available) {
+            std::snprintf(summary,sizeof(summary),"%u %s  /  %u %s  /  %u %s",
+                row.hits,row.hits==1 ? "hit" : "hits",row.misses,row.misses==1 ? "miss" : "misses",row.blocks,row.blocks==1 ? "block" : "blocks");
+            const float width = valueFont->CalcTextSizeA(lineHeight,FLT_MAX,0,summary).x;
+            summaryScale = std::min(0.96f,(size.x-2*inset)/width);
+            summaryWidth = width*summaryScale;
+        }
+        const float textHeight = lineHeight+(available ? gap+lineHeight*summaryScale : 0);
+        const float top = position.y+(size.y-textHeight)*0.5f;
+        BodyText(draw,labels[index],UiPoint(position.x+inset,top),lineScale,GoldColor);
+        const float right = position.x+size.x-inset;
+        if (available && row.Attempts()) {
+            char percent[24];
+            std::snprintf(percent,sizeof(percent),"%.1f%%",100*row.Rate());
+            const float width = valueFont->CalcTextSizeA(lineHeight,FLT_MAX,0,percent).x;
+            BodyText(draw,percent,UiPoint(right-width,top),lineScale);
+        } else {
+            const float center = top+lineHeight*0.5f;
+            draw->AddLine(UiPoint(right-11*lineScale.x,center),UiPoint(right,center),MutedColor,std::max(1.0f,lineScale.y));
+        }
+        if (available) {
+            const UiPoint center(position.x+(size.x-summaryWidth)*0.5f,top+lineHeight+gap);
+            BodyText(draw,summary,center,UiPoint(lineScale.x*summaryScale,lineScale.y*summaryScale));
+        }
+        if (hovered) QueueHelp("Counts your weapon attacks and weapon skills that roll for accuracy. Blocks passed the accuracy roll. Compare the same enemy type and skill when testing Attack Rating.",
+            UiPoint(helpRight,position.y),scale,panelLeft);
+    }
+}
+
 static void DrawPanel() {
     panelOptionsArea = {};
     if (!addonRegistry.Damage() || !nativeSkin.Ready() || historyOpen) { panelOptionsOpen=false; return; }
     if (addonsOpen || reportOpen) panelOptionsOpen=false;
     const bool optionsExpanded = panelOptionsOpen;
+    const bool showAccuracy = accuracyView;
+    const auto& accuracy = mode ? packet.accuracy.overall : packet.accuracy.current;
     const MeterView& view = packet.views[mode+direction*2];
     const UiPoint display = Ui::GetIO().DisplaySize;
-    const char* status = packet.status[0] ? packet.status : panelSizeSaveFailed ? "Panel size could not be saved." : !measurementEnabled ? "Measurement paused" : WindowsCompat::Milliseconds() - lastUpdate > 3000 ? "Waiting for combat data" : "";
+    const char* status = showAccuracy && !packet.accuracy.available ? "Accuracy unavailable" :
+        packet.status[0] ? packet.status : panelSizeSaveFailed ? "Panel size could not be saved." :
+        !measurementEnabled ? "Measurement paused" : WindowsCompat::Milliseconds() - lastUpdate > 3000 ? "Waiting for combat data" : "";
     const UiPoint scale = MeterScale(UiPoint(330,300));
-    const auto entries=DisplayRows(view);
-    const unsigned rows=std::max(1u,std::min(12u,static_cast<unsigned>(entries.size())));
+    const auto entries = showAccuracy ? std::vector<MeterDisplayRow>{} : DisplayRows(view);
+    const unsigned rows = showAccuracy ? static_cast<unsigned>(accuracy.size()) :
+        std::max(1u,std::min(12u,static_cast<unsigned>(entries.size())));
     const float footer = status[0] ? 36.0f : 18.0f;
     const float width = std::min(panelWidth,(display.x-8)/scale.x);
     const float contentWidth = width-30;
     const unsigned optionColumns = contentWidth >= 250 ? 4u : 2u;
     const float headerHeight = 60+(optionsExpanded ? (4/optionColumns)*30.0f+4 : 0);
-    const float rowHeight = std::min(panelRowHeight,((display.y-8)/scale.y-headerHeight-footer)/rows);
-    const float textFactor = std::clamp(std::min(rowHeight/25,contentWidth/300),0.72f,2.0f);
+    const float rowExtra = showAccuracy ? 15.0f : 0.0f;
+    const float rowHeight = std::min(panelRowHeight+rowExtra,((display.y-8)/scale.y-headerHeight-footer)/rows);
+    const float textFactor = std::clamp(showAccuracy ? rowHeight/40.0f : std::min(rowHeight/25,contentWidth/300),0.72f,2.0f);
     const UiPoint textScale(scale.x*textFactor,scale.y*textFactor);
     const UiPoint size(width*scale.x,(headerHeight+rows*rowHeight+footer)*scale.y);
     if (panelPositionPending) { Ui::SetNextWindowPos(panelNextPosition); panelPositionPending=false; }
@@ -1188,18 +1243,36 @@ static void DrawPanel() {
         auto point = [origin,scale](float x,float y) { return At(origin,scale,x,y); };
         nativeSkin.Frame(draw,origin,size,scale);
         Heading(draw,"Damage Meter",point(19,9),scale,128,0.62f);
-        char elapsed[48]; std::snprintf(elapsed,sizeof(elapsed),"%.1f s",view.duration);
-        RightMeterText(draw,elapsed,point(width-19,13),UiPoint(scale.x*0.85f,scale.y*0.85f),MutedColor,(width-158)*scale.x);
+        char summary[48]{};
+        if (showAccuracy) {
+            if (packet.accuracy.available) {
+                const auto rolls = accuracy[0].Attempts()+accuracy[1].Attempts();
+                std::snprintf(summary,sizeof(summary),"%llu %s",static_cast<unsigned long long>(rolls),rolls==1 ? "roll" : "rolls");
+            }
+        } else std::snprintf(summary,sizeof(summary),"%.1f s",view.duration);
+        RightMeterText(draw,summary,point(width-19,showAccuracy ? 9.0f : 13.0f),UiPoint(scale.x*0.85f,scale.y*0.85f),MutedColor,(width-158)*scale.x);
         const float controlFactor = 0.64f*std::min(1.0f,contentWidth/300);
         const UiPoint compact(scale.x*controlFactor,scale.y*controlFactor);
         const float modeWidth = (contentWidth-8)*0.26f, directionWidth = (contentWidth-8)*0.46f;
         if (SkinControl("view",mode ? "Overall" : "Current",point(15,31),UiPoint(modeWidth*scale.x,25*scale.y),compact,&panelModeRect)) { mode ^= 1; SavePreferences(); }
-        if (Ui::IsItemHovered()) QueueHelp("Current starts when anyone in the party deals or takes damage. Done and Taken share the same fight, ending after 10 seconds without either type of hit. Timeout waiting is excluded from DPS. Overall excludes idle gaps.",point(width+5,31),scale,origin.x);
-        if (SkinControl("direction",direction ? "Damage Taken" : "Damage Done",point(19+modeWidth,31),UiPoint(directionWidth*scale.x,25*scale.y),compact,&panelDirectionRect)) { direction ^= 1; selectedCharacter=0; selectedPet=0; detailActorName.clear(); detailByActor=true; SavePreferences(); }
-        if (Ui::IsItemHovered()) QueueHelp("Damage Done includes attacks by you and your pets against any target. Damage Taken shows your own HP loss and separate bars for damage received by your pets. Each pet type is grouped per owner, including respawns. Done and Taken share the same party fight and timer.",point(width+5,31),scale,origin.x);
+        if (Ui::IsItemHovered()) QueueHelp(showAccuracy ?
+            "Current keeps your last group of attacks. The next roll after 10 seconds starts a new group. Overall counts all your rolls since reset." :
+            "Current starts when anyone in the party deals or takes damage. Done and Taken share the same fight, ending after 10 seconds without either type of hit. Timeout waiting is excluded from DPS. Overall excludes idle gaps.",point(width+5,31),scale,origin.x);
+        if (SkinControl("direction",showAccuracy ? "Accuracy" : direction ? "Damage Taken" : "Damage Done",
+                        point(19+modeWidth,31),UiPoint(directionWidth*scale.x,25*scale.y),compact,&panelDirectionRect)) {
+            if (showAccuracy) { accuracyView=false; direction=0; }
+            else if (direction) accuracyView=true;
+            else direction=1;
+            selectedCharacter=0; selectedPet=0; detailActorName.clear(); detailByActor=true;
+            EndPanelResize();
+            SavePreferences();
+        }
+        if (Ui::IsItemHovered()) QueueHelp(showAccuracy ?
+            "Accuracy shows your successful rolls, including blocks. Click to switch to Damage Done." :
+            "Damage Done includes attacks by you and your pets. Damage Taken shows your HP loss and separate bars for your pets. Click to cycle Damage Done, Damage Taken and Accuracy.",point(width+5,31),scale,origin.x);
         if (SkinControl("options","Menu",point(23+modeWidth+directionWidth,31),UiPoint((contentWidth-modeWidth-directionWidth-8)*scale.x,25*scale.y),compact,&panelOptionsRect)) panelOptionsOpen = !panelOptionsOpen;
         if (Ui::IsItemHovered() && !panelOptionsOpen) QueueHelp("Expand the action bar for history, party report, reset and hide.",point(width+5,31),scale,origin.x);
-        if (optionsExpanded) DrawPanelActions(origin,scale,width,optionColumns);
+        if (optionsExpanded) DrawPanelActions(origin,scale,width,optionColumns,showAccuracy);
         double highest=1;
         for (const auto& entry:entries) highest=std::max(highest,entry.data->damage);
         const float barWidth=contentWidth-(entries.size()>rows ? 12.0f : 0.0f);
@@ -1208,52 +1281,56 @@ static void DrawPanel() {
         const float nameWidth=innerWidth-damageWidth-dpsWidth-16;
         const float textY=(rowHeight-2-MeterTextSize("Max",textScale).y/scale.y)*0.5f;
         Ui::SetCursorScreenPos(point(15,headerHeight));
-        if (Ui::BeginChild("meter-bars",UiPoint(contentWidth*scale.x,rows*rowHeight*scale.y))) {
-            for (unsigned i=0;i<entries.size();++i) {
-                const auto& entry=entries[i];
-                const PlayerRow& row=*entry.data;
-                const UiPoint position=Ui::GetCursorScreenPos();
-                const UiPoint rowSize(barWidth*scale.x,(rowHeight-2)*scale.y);
-                Ui::PushID(static_cast<int>(row.characterId));
-                Ui::PushID(std::to_string(entry.pet).c_str());
-                if (Ui::InvisibleButton("player",UiPoint(rowSize.x,rowHeight*scale.y))) SelectRow(entry);
-                if (!i) firstRowRect=ItemRectangle();
-                const bool hovered=Ui::IsItemHovered();
-                auto* list=Ui::GetWindowDrawList();
-                nativeSkin.Row(list,position,rowSize,scale,static_cast<float>(row.damage/highest),hovered);
-                const float indent=entry.pet ? 8.0f : 0.0f;
-                const std::string name=MeterName(row.name,textScale,(nameWidth-indent)*scale.x);
-                list->PushClipRect(At(position,scale,5,2),At(position,scale,barWidth-5,rowHeight-4));
-                MeterText(list,name.c_str(),At(position,scale,8+indent,textY),textScale,entry.pet ? BodyColor : GoldColor);
-                char number[64];
-                RightMeterText(list,FormatDamage(row.damage,1).c_str(),At(position,scale,barWidth-16-dpsWidth,textY),textScale,BodyColor,damageWidth*scale.x);
-                std::snprintf(number,sizeof(number),"%.0f DPS",row.dps);
-                RightMeterText(list,number,At(position,scale,barWidth-8,textY),textScale,BodyColor,dpsWidth*scale.x);
-                list->PopClipRect();
-                if (hovered) {
-                    char description[384];
-                    std::snprintf(description,sizeof(description),"%s%s%s\n%s damage, %.0f DPS, %u hits.\n%sClick for skills, damage components and their share of total damage.",row.name,entry.pet ? " | Owner: " : "",entry.pet ? entry.owner : "",FormatDamage(row.damage).c_str(),row.dps,row.hits,entry.pet ? "Damage received by all summons of this type, including respawns. Excluded from the owner's Damage Taken.\n" : "");
-                    QueueHelp(description,UiPoint(origin.x+size.x+5*scale.x,position.y),scale,origin.x);
+        if (showAccuracy) {
+            DrawAccuracyRows(accuracy,point(15,headerHeight),scale,textScale,barWidth,rowHeight,packet.accuracy.available,origin.x,point(width+5,0).x);
+        } else {
+            if (Ui::BeginChild("meter-bars",UiPoint(contentWidth*scale.x,rows*rowHeight*scale.y))) {
+                for (unsigned i=0;i<entries.size();++i) {
+                    const auto& entry=entries[i];
+                    const PlayerRow& row=*entry.data;
+                    const UiPoint position=Ui::GetCursorScreenPos();
+                    const UiPoint rowSize(barWidth*scale.x,(rowHeight-2)*scale.y);
+                    Ui::PushID(static_cast<int>(row.characterId));
+                    Ui::PushID(std::to_string(entry.pet).c_str());
+                    if (Ui::InvisibleButton("player",UiPoint(rowSize.x,rowHeight*scale.y))) SelectRow(entry);
+                    if (!i) firstRowRect=ItemRectangle();
+                    const bool hovered=Ui::IsItemHovered();
+                    auto* list=Ui::GetWindowDrawList();
+                    nativeSkin.Row(list,position,rowSize,scale,static_cast<float>(row.damage/highest),hovered);
+                    const float indent=entry.pet ? 8.0f : 0.0f;
+                    const std::string name=MeterName(row.name,textScale,(nameWidth-indent)*scale.x);
+                    list->PushClipRect(At(position,scale,5,2),At(position,scale,barWidth-5,rowHeight-4));
+                    MeterText(list,name.c_str(),At(position,scale,8+indent,textY),textScale,entry.pet ? BodyColor : GoldColor);
+                    char number[64];
+                    RightMeterText(list,FormatDamage(row.damage,1).c_str(),At(position,scale,barWidth-16-dpsWidth,textY),textScale,BodyColor,damageWidth*scale.x);
+                    std::snprintf(number,sizeof(number),"%.0f DPS",row.dps);
+                    RightMeterText(list,number,At(position,scale,barWidth-8,textY),textScale,BodyColor,dpsWidth*scale.x);
+                    list->PopClipRect();
+                    if (hovered) {
+                        char description[384];
+                        std::snprintf(description,sizeof(description),"%s%s%s\n%s damage, %.0f DPS, %u hits.\n%sClick for skills, damage components and their share of total damage.",row.name,entry.pet ? " | Owner: " : "",entry.pet ? entry.owner : "",FormatDamage(row.damage).c_str(),row.dps,row.hits,entry.pet ? "Damage received by all summons of this type, including respawns. Excluded from the owner's Damage Taken.\n" : "");
+                        QueueHelp(description,UiPoint(origin.x+size.x+5*scale.x,position.y),scale,origin.x);
+                    }
+                    Ui::PopID();
+                    Ui::PopID();
                 }
-                Ui::PopID();
-                Ui::PopID();
+                if (entries.empty()) {
+                    const auto waiting=MeterName("Waiting for character / party",textScale,(contentWidth-16)*scale.x);
+                    MeterText(Ui::GetWindowDrawList(),waiting.c_str(),point(23,headerHeight+textY),textScale,MutedColor);
+                }
             }
-            if (entries.empty()) {
-                const auto waiting=MeterName("Waiting for character / party",textScale,(contentWidth-16)*scale.x);
-                MeterText(Ui::GetWindowDrawList(),waiting.c_str(),point(23,headerHeight+textY),textScale,MutedColor);
-            }
+            Ui::EndChild();
         }
-        Ui::EndChild();
         if (status[0]) {
             const auto label = MeterName(status,scale,contentWidth*scale.x);
             MeterText(draw,label.c_str(),point(15,headerHeight+3+rows*rowHeight),scale,MutedColor);
             if (HoverArea(point(15,headerHeight+rows*rowHeight),UiPoint(contentWidth*scale.x,18*scale.y))) QueueHelp(status,point(width+5,headerHeight+rows*rowHeight),scale,origin.x);
         }
-        ResizePanel(origin,size,scale,rows,rowHeight,headerHeight,footer);
+        ResizePanel(origin,size,scale,rows,rowHeight,headerHeight,footer,rowExtra);
         if (!addonsOpen && !reportOpen) RegisterHitArea();
     }
     Ui::End();
-    if (selectedCharacter && !historyOpen) DrawDetails(view);
+    if (!showAccuracy && selectedCharacter && !historyOpen) DrawDetails(view);
 }
 
 static void DrawHistory() {
@@ -1423,7 +1500,7 @@ static int OptionRow(const char* label,const char* value,UiPoint position,UiPoin
 static void DrawDamageSettings(UiPoint origin,UiPoint scale) {
     auto point = [origin,scale](float x,float y) { return At(origin,scale,x,y); };
     Heading(Ui::GetWindowDrawList(),"Damage Meter",point(34,20),scale,280);
-    if (OptionRow("Measurement:",draftEnabled?"On":"Off",point(10,58),scale,"Records effective damage and combat time. Off pauses collection and keeps existing totals. Apply with Okay.",point(355,58),origin.x)) draftEnabled = !draftEnabled;
+    if (OptionRow("Measurement:",draftEnabled?"On":"Off",point(10,58),scale,"Records damage, combat time and weapon accuracy. Off pauses collection and keeps existing totals. Apply with Okay.",point(355,58),origin.x)) draftEnabled = !draftEnabled;
     if (OptionRow("Damage Meter:",draftVisible?"On":"Off",point(10,96),scale,"Shows or hides the damage panel. Hiding it does not pause enabled measurement. The Show / hide shortcut toggles visibility too.",point(355,96),origin.x,&meterCheckboxRect)) draftVisible = !draftVisible;
     if (OptionRow("View:",draftMode?"Overall":"Current",point(10,134),scale,"Done and Taken share one party fight. The first outgoing or incoming hit starts it; 10 seconds without either ends it. Timeout waiting is excluded from DPS. Minimum time: 1 second.",point(355,134),origin.x)) draftMode ^= 1;
     char zoom[16]; std::snprintf(zoom,sizeof(zoom),"%u%%",draftMeterScalePercent);
@@ -2252,7 +2329,7 @@ static void DiscoverAddons(const std::filesystem::path& root) {
     addonRegistry.Discover(root);
     registeredAddons.clear();
     libraryPage=0;
-    if (addonRegistry.Damage()) registeredAddons.push_back({"damage-meter","Damage Meter","Combat damage, DPS and party reports.",OpenDamageSettings,DrawDamageSettings,nullptr});
+    if (addonRegistry.Damage()) registeredAddons.push_back({"damage-meter","Damage Meter","Combat damage, DPS, weapon accuracy and party reports.",OpenDamageSettings,DrawDamageSettings,nullptr});
     if (addonRegistry.Money()) registeredAddons.push_back({"hide-gold-labels","Hide Gold Labels","Hide gold labels in own and party loot.",OpenLootSettings,DrawLootSettings,nullptr});
     if (addonRegistry.Cooldowns()) registeredAddons.push_back({"cooldown-timers","Cooldown Timers","Skill cooldowns and Buff / Curse durations.",OpenCooldownSettings,DrawCooldownSettings,nullptr});
     if (addonRegistry.Nameplates()) registeredAddons.push_back({"nameplates","Nameplates","Player names, HP / Mana and Posse; pet HP bars.",OpenNameplateSettings,DrawNameplateSettings,nullptr});
@@ -2450,7 +2527,7 @@ extern "C" __declspec(dllexport) int __cdecl MeterOverlayStart(const char* iniFi
     shuttingDown = false;
     selectedCharacter = 0; selectedPet = 0;
     mode = 0;
-    direction = 0; detailActor=0; detailActorName.clear(); detailByActor=true;
+    direction = 0; accuracyView = false; detailActor=0; detailActorName.clear(); detailByActor=true;
     panelWidth = 330; panelRowHeight = 25;
     meterScalePercent = draftMeterScalePercent = 100;
     meterScaleRect = {};
@@ -2471,6 +2548,8 @@ extern "C" __declspec(dllexport) int __cdecl MeterOverlayStart(const char* iniFi
         if (input >> savedDirection && savedDirection<=1) direction=savedDirection;
         unsigned savedScale=100;
         if (input >> savedScale && savedScale>=50 && savedScale<=200 && savedScale%10==0) meterScalePercent=savedScale;
+        unsigned savedAccuracy = 0;
+        if (input >> savedAccuracy && savedAccuracy <= 1) accuracyView = savedAccuracy != 0;
         std::ifstream hotkeyFile(std::filesystem::u8path(settingsFile+".hotkey"));
         HotkeyBinding savedHotkey;
         std::string extra;

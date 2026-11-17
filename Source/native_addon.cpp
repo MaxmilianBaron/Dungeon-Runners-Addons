@@ -8,6 +8,7 @@
 #include <stdexcept>
 #include "AardvarkHook/patch.h"
 #include "native_reader.h"
+#include "native_accuracy.h"
 #include "native_nameplates.h"
 #include "native_hotkeys.h"
 #include "native_controller.h"
@@ -85,9 +86,11 @@ extern "C" void __cdecl MeterOverlayLoadoutInputTest(AddonInputTest);
 static WindowsCompat::Once bootstrap;
 static volatile LONG ready = 0;
 static volatile LONG collecting = 0;
+static volatile LONG accuracyAvailable = 0, accuracyCollecting = 0;
 static uintptr_t image = 0;
 static std::recursive_mutex stateGate;
 static NativeMeter meter;
+static NativeAccuracy accuracy;
 static CursorCombat cursorCombat;
 static NativeBankSort bankSort;
 static NativeBankSort inventorySort(true);
@@ -168,6 +171,8 @@ static bool VerifyCatalog(const std::filesystem::path& directory) {
 static void Fault(const char* text) {
     std::lock_guard<std::recursive_mutex> lock(stateGate);
     meter.Fail(text);
+    accuracy.Close();
+    InterlockedExchange(&accuracyCollecting, 0);
     cursorCombat.Reset();
     MeterOverlayCursorCombat(0);
     bankSort.Reset();
@@ -579,7 +584,8 @@ static void RefreshUi(const NativeReader& reader) {
         MeterOverlayController(nullptr,&controller.Status(),nullptr,nullptr,nullptr);
     } else controller.Release();
     const uintptr_t ui = reader.Pointer(image + 0x5314b0);
-    const bool shown = reader.InWorld();
+    uint32_t localCharacter = 0;
+    const bool shown = reader.InWorld(&localCharacter);
     enhancedZoom.Service(reader,image,MeterOverlayEnhancedZoomEnabled());
     MoveLayoutSettings layoutSettings;
     const bool moveInstalled = MeterOverlayMoveSettings(&layoutSettings,nullptr);
@@ -640,6 +646,9 @@ static void RefreshUi(const NativeReader& reader) {
     {
         std::lock_guard<std::recursive_mutex> lock(stateGate);
         if (actions & 1) { meter.Reset(); nextSnapshot = nextRoster = 0; }
+        if (actions & MeterResetAccuracy) { accuracy.Reset(); nextSnapshot = 0; }
+        accuracy.Character(localCharacter);
+        if (!enabled) accuracy.Close();
         if (actions & 2) { history.Finish("Finished manually",now); nextHistory=0; }
         meter.Enable(enabled);
         if (!enabled) history.Pause(true);
@@ -664,9 +673,12 @@ static void RefreshUi(const NativeReader& reader) {
         }
         if (cursorEnabled && shown && !reader.LocalAvatarAlive()) cursorCombat.Reset();
         InterlockedExchange(&collecting, shown && meter.HasRoster() && (meter.Enabled() || cursorEnabled) ? 1 : 0);
+        const bool canMeasureAccuracy = InterlockedCompareExchange(&accuracyAvailable, 0, 0) != 0;
+        InterlockedExchange(&accuracyCollecting, shown && meter.Enabled() && canMeasureAccuracy ? 1 : 0);
         MeterOverlayCursorCombat(cursorEnabled ? cursorCombat.Until() : 0);
         if (now >= nextSnapshot) {
             meter.Snapshot(snapshot, now);
+            snapshot.accuracy = accuracy.Snapshot(canMeasureAccuracy);
             updated = true;
             nextSnapshot = now + 200;
         }
@@ -708,6 +720,14 @@ static void SyncMenuFrame(const NativeReader& reader) {
 
 static void Observe(unsigned kind, const HookRegisters& registers) {
     NativeReader reader(image, CopyMemoryChecked, LookupLabel);
+    if (kind == MeterAccuracyDispatch) {
+        if (!InterlockedCompareExchange(&accuracyCollecting, 0, 0)) return;
+        const auto roll = ReadAccuracyRoll(reader, image, registers.esp + 4, registers.eax, registers.ecx);
+        if (!roll.character) return;
+        std::lock_guard<std::recursive_mutex> lock(stateGate);
+        if (InterlockedCompareExchange(&accuracyCollecting, 0, 0)) accuracy.Record(roll, WindowsCompat::Milliseconds());
+        return;
+    }
     if (kind >= 10 && kind <= 12) {
         std::lock_guard<std::recursive_mutex> lock(stateGate);
         if (kind == 10) wishingWell.Accepted(reader,image,registers.ebp,registers.esi,NativeWishingWell::UtcNow());
@@ -779,6 +799,8 @@ static void Observe(unsigned kind, const HookRegisters& registers) {
         inventorySort.Reset();
         loadouts.Reset();
         meter.Zone();
+        accuracy.Close();
+        InterlockedExchange(&accuracyCollecting, 0);
         history.LeaveZone();
         inWorld = false;
         uiPrepared = false;
@@ -847,7 +869,15 @@ extern "C" void __cdecl MeterDispatch(unsigned kind, const HookRegisters* regist
     const DWORD error = GetLastError();
     if (InterlockedCompareExchange(&ready, 0, 0)) {
         try { Observe(kind, *registers); }
-        catch (...) { try { Fault("Measurement stopped: observer failure"); } catch (...) { InterlockedExchange(&collecting, 0); } }
+        catch (...) {
+            if (kind == MeterAccuracyDispatch) {
+                InterlockedExchange(&accuracyCollecting, 0);
+                InterlockedExchange(&accuracyAvailable, 0);
+            } else {
+                try { Fault("Measurement stopped: observer failure"); }
+                catch (...) { InterlockedExchange(&collecting, 0); }
+            }
+        }
     }
     SetLastError(error);
 }
@@ -914,6 +944,26 @@ static bool InstallHooks() {
     return false;
 }
 
+static bool InstallAccuracyHook() {
+    if (image != 0x400000) return false;
+    struct Region { uintptr_t rva; unsigned size; const char* sha256; };
+    constexpr Region regions[] = {
+        {0x197e50, 2076, "ff3c08501354cdb805475173fc2d79c8c5bdd9e872c56dd6b473391525e20c1a"},
+        {0x1921c0, 116, "bc4765692c5470d332ae698fdaec3e65a1316534c3412058bc0566d0f77531dd"},
+        {0x194430, 702, "b08112db6ccdf121661ec0157d66b6cef311a410e81691e1b4dbaab958961bc4"},
+        {0x1960f0, 128, "e916bb8dc44a420cd0a419d6a93255decef5e4ab39545154fbe2fbbc6eb0dca8"},
+    };
+    unsigned char code[2076];
+    for (const auto& region : regions) {
+        if (!CopyMemoryChecked(image + region.rva, code, region.size) ||
+            WindowsHash::Sha256(code, region.size) != region.sha256) return false;
+    }
+    static NativePatchSet patch;
+    const NativePatchSpec spec{reinterpret_cast<void*>(image + 0x19815c), reinterpret_cast<void*>(MeterAccuracy),
+        &MeterAccuracyOriginal, "84c00f94c084c00f8470010000", 5};
+    return patch.Install(&spec, 1);
+}
+
 static BOOL CALLBACK InitializeAddon() {
     wchar_t executable[32768]{};
     const DWORD chars = GetModuleFileNameW(nullptr, executable, static_cast<DWORD>(std::size(executable)));
@@ -948,6 +998,9 @@ static BOOL CALLBACK InitializeAddon() {
         MeterOverlayLoadoutInputTest(LoadoutInput);
         InterlockedExchange(&nameplateMask,static_cast<LONG>(MeterOverlayNameplates()));
         if (!InstallHooks()) throw std::runtime_error("Native hook validation failed; addon disabled");
+        bool accuracyInstalled = false;
+        try { accuracyInstalled = InstallAccuracyHook(); } catch (...) {}
+        InterlockedExchange(&accuracyAvailable, accuracyInstalled ? 1 : 0);
         if (MeterOverlayUnbindInstalled()) {
             static NativePatchSet leftClickPatch;
             const NativePatchSpec spec{reinterpret_cast<void*>(image+0x2aad0),reinterpret_cast<void*>(LeftClickFallbackHook),
@@ -974,6 +1027,7 @@ static BOOL CALLBACK InitializeAddon() {
         MeterOverlayChatTimestampsAvailable(chatTimestampsInstalled);
         std::ofstream output(status, std::ios::trunc);
         output << "Addons loaded inside DungeonRunners.exe\nClient SHA256: " << digest << "\nHooks: " << std::size(hooks) << "\nSkill labels: " << std::size(SkillLabels) << "\nZone definitions: " << std::size(DungeonZones) << "\n";
+        output << "Accuracy hook: " << (accuracyInstalled ? "installed" : "unavailable") << '\n';
         output << "Mouse look hooks: " << (mouseLookInstalled ? "installed" : "unavailable") << '\n';
         output << "Enhanced zoom hooks: " << (enhancedZoom.Available() ? "installed" : "unavailable") << '\n';
         output << "Chat timestamps hook: " << (chatTimestampsInstalled ? "installed" : "unavailable") << '\n';

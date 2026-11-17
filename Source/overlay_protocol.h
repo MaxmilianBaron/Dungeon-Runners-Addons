@@ -1,9 +1,11 @@
 #pragma once
+#include <array>
 #include <cstdint>
 #include <vector>
 
 constexpr uint32_t MeterMagic = 0x324d5244;
-constexpr uint32_t MeterVersion = 10;
+constexpr uint32_t MeterVersion = 11;
+constexpr unsigned MeterResetAccuracy = 4;
 constexpr unsigned MeterPlayers = 5;
 constexpr unsigned MeterSkills = 8192;
 constexpr unsigned MeterTargets = 8192;
@@ -77,12 +79,25 @@ struct MeterView {
     std::vector<TargetRow> targets;
     std::vector<DetailRow> details;
 };
+struct AccuracyCounts {
+    uint32_t hits = 0, misses = 0, blocks = 0;
+    uint64_t Attempts() const { return uint64_t(hits) + misses + blocks; }
+    double Rate() const {
+        const auto attempts = Attempts();
+        return attempts ? static_cast<double>(uint64_t(hits) + blocks) / attempts : 0.0;
+    }
+};
+struct AccuracySnapshot {
+    std::array<AccuracyCounts,2> current{}, overall{};
+    bool available = false;
+};
 struct MeterPacket {
     uint32_t magic;
     uint32_t version;
     uint32_t flags;
     char status[128];
     MeterView views[4];
+    AccuracySnapshot accuracy{};
 };
 static_assert(sizeof(SkillRow) == 220);
 static_assert(sizeof(TargetRow) == 112);

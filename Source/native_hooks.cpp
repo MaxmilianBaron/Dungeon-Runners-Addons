@@ -3,6 +3,7 @@
 extern "C" {
 void* MeterBeforeOriginal = nullptr;
 void* MeterCommitOriginal = nullptr;
+void* MeterAccuracyOriginal = nullptr;
 void* MeterLoadingOriginal = nullptr;
 void* MeterValidateOriginal = nullptr;
 void* MeterPresentOriginal = nullptr;
@@ -83,6 +84,7 @@ extern "C" __declspec(naked) void Name() { \
 
 METER_STUB(MeterBefore, MeterBeforeOriginal, 0)
 METER_STUB(MeterCommit, MeterCommitOriginal, 1)
+METER_STUB(MeterAccuracy, MeterAccuracyOriginal, MeterAccuracyDispatch)
 METER_STUB(MeterLoading, MeterLoadingOriginal, 2)
 METER_STUB(MeterValidate, MeterValidateOriginal, 3)
 METER_STUB(MeterPresent, MeterPresentOriginal, 4)

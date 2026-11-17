@@ -9,6 +9,8 @@ struct HookRegisters {
 extern "C" void __cdecl MeterDispatch(unsigned, const HookRegisters*);
 extern "C" void MeterBefore();
 extern "C" void MeterCommit();
+extern "C" void MeterAccuracy();
+constexpr unsigned MeterAccuracyDispatch = 14;
 extern "C" void MeterLoading();
 extern "C" void MeterValidate();
 extern "C" void MeterPresent();
@@ -30,6 +32,7 @@ extern "C" volatile uintptr_t MoveProjectionTarget;
 extern "C" void __fastcall MoveProjectionLoad(uintptr_t,uintptr_t,unsigned,const float*);
 extern "C" void* MeterBeforeOriginal;
 extern "C" void* MeterCommitOriginal;
+extern "C" void* MeterAccuracyOriginal;
 extern "C" void* MeterLoadingOriginal;
 extern "C" void* MeterValidateOriginal;
 extern "C" void* MeterPresentOriginal;
