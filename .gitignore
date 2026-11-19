@@ -26,7 +26,9 @@ backups/
 custom.audio
 cooldowns.dat*
 settings.ini.pending
+*.trade-token
 *.loadouts
 *.loadouts.pending
 /Building.md
 /CONTRIBUTING.md
+Addons/TradeAuction/watchlist.json*

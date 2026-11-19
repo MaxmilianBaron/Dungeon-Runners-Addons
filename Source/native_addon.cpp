@@ -30,6 +30,8 @@
 #include "unbind_left_click.h"
 #include "native_bank_sort.h"
 #include "native_loadouts.h"
+#include "native_trade_auction.h"
+#include "native_sally_sam.h"
 #include "native_move_layout.h"
 #include "move_projection.h"
 #include "client_compatibility.h"
@@ -40,6 +42,8 @@ extern "C" void __cdecl MeterOverlayMenu(float, float, float, float);
 extern "C" void __cdecl MeterOverlayUiSize(int, int);
 extern "C" void __cdecl MeterOverlayLayer(IDirect3DDevice9*,AddonUiLayer);
 extern "C" void __cdecl MeterOverlayEndFrame();
+bool MeterOverlaySallySamEnabled();
+void MeterOverlaySallySam(const SallySam::Frame& frame);
 extern "C" void __cdecl MeterOverlayInputTest(AddonInputTest);
 extern "C" void __cdecl MeterOverlayHotkeyTest(AddonHotkeyTest);
 extern "C" bool __cdecl MeterOverlayController(Controller::Settings*,const Controller::Status*,HWND*,bool*,IDirect3DDevice9*);
@@ -82,6 +86,15 @@ extern "C" bool __cdecl MeterOverlayMoveSettings(MoveLayoutSettings*,const MoveL
 extern "C" void __cdecl MeterOverlayBankInputTest(AddonInputTest);
 extern "C" bool __cdecl MeterOverlayLoadouts(const LoadoutFrame*,LoadoutCommand*,bool*);
 extern "C" void __cdecl MeterOverlayLoadoutInputTest(AddonInputTest);
+extern "C" bool __cdecl MeterOverlayTradeRequest(TradeAuction::Capture*);
+extern "C" bool __cdecl MeterOverlayTradeEnabled();
+std::shared_ptr<const TradeAuction::WantedIndex> MeterOverlayTradeWanted(uint64_t now);
+std::shared_ptr<const TradeAuction::LocalWatches> MeterOverlayTradeLocalWatches();
+void MeterOverlayTradeLocalAvailable(bool available);
+extern "C" void __cdecl MeterOverlayTradeGeometry(const BankSortFrame&,unsigned,bool,uintptr_t,
+    bool (*)(uintptr_t,const unsigned char*,unsigned,unsigned char*,unsigned));
+extern "C" void __cdecl MeterOverlayTradeSelection(const TradeAuction::Capture&,bool,std::string,uint32_t,
+    std::vector<TradeAuction::Choice>,TradeAuction::Item);
 
 static WindowsCompat::Once bootstrap;
 static volatile LONG ready = 0;
@@ -115,6 +128,13 @@ static uintptr_t hiddenMenuFrame = 0;
 static bool uiPrepared = false;
 static NativeCharacterSheet characterSheet;
 static NativeMythicSounds mythicSounds;
+static bool tradeNativeAvailable=false,tradeLocalAvailable=false,tradeChatFailed=false,tradeLinkFailed=false;
+static bool tradeHoverAvailable=false;
+static std::shared_ptr<const TradeAuction::WantedIndex> tradeWantedIndex;
+static std::shared_ptr<const TradeAuction::LocalWatches> tradeLocalWatches;
+static MythicQueue tradeDrops;
+static MythicNotices tradeNotices;
+static uintptr_t tradeZone=0;
 static NativeWishingWell wishingWell;
 static volatile LONG hideGold = 0;
 static volatile LONG unbindLeft = 0;
@@ -391,6 +411,12 @@ static bool OverlayInput(float x,float y,bool menuLayer) {
     return reader.OverlayInput(VisibleControlAt(root,point),menuLayer);
 }
 
+extern "C" void __cdecl MeterNativeTradeClearHover() {
+    if (!InterlockedCompareExchange(&ready,0,0) || !tradeHoverAvailable) return;
+    const NativeReader reader(image,CopyMemoryChecked,LookupLabel);
+    if (reader.Pointer(image+0x533e18)) TradeAuction::ClearNativeHover(image);
+}
+
 static bool MouseLookForeground(HWND window) {
     DWORD process = 0;
     return window && IsWindow(window) && !IsIconic(window) && GetForegroundWindow() == window &&
@@ -617,6 +643,18 @@ static void RefreshUi(const NativeReader& reader) {
         MeterOverlayBankSettings(&bankSort.Frame(),nullptr,nullptr);
     }
     MeterOverlayLoadouts(&loadouts.Frame(),nullptr,nullptr);
+    TradeAuction::Capture tradeRequest;
+    if (shown && MeterOverlayTradeRequest(&tradeRequest)) {
+        if (tradeRequest.kind!=TradeAuction::Capture::Kind::None) {
+            std::string character;
+            uint32_t characterId=0;
+            std::vector<TradeAuction::Choice> choices;
+            TradeAuction::Item item;
+            const bool captured=tradeNativeAvailable && !bankSort.Frame().busy && !inventorySort.Frame().busy &&
+                !loadouts.Frame().busy && TradeAuction::CapturePage(reader,image,tradeRequest,character,characterId,choices,item);
+            MeterOverlayTradeSelection(tradeRequest,captured,std::move(character),characterId,std::move(choices),std::move(item));
+        }
+    }
     MythicSettings soundSettings;
     unsigned previewVolume = 100;
     HWND browse = nullptr;
@@ -633,8 +671,26 @@ static void RefreshUi(const NativeReader& reader) {
     const uint64_t utc = NativeWishingWell::UtcNow();
     { std::lock_guard<std::recursive_mutex> lock(stateGate); wellState = wishingWell.State(utc); }
     const bool wellInstalled = MeterOverlayWellSettings(&wellSettings,&wellAction,&wellState);
+    auto wanted=shown && tradeNativeAvailable ? MeterOverlayTradeWanted(now) : nullptr;
+    auto local=shown && tradeLocalAvailable ? MeterOverlayTradeLocalWatches() : nullptr;
     {
         std::lock_guard<std::recursive_mutex> lock(stateGate);
+        const auto zone=wanted || local ? reader.Pointer(reader.Pointer(image+0x5314b0)+0x1b4) : 0;
+        if (zone!=tradeZone) {
+            tradeDrops.Clear();
+            tradeNotices.Clear();
+            tradeZone=zone;
+        }
+        tradeWantedIndex=std::move(wanted);
+        tradeLocalWatches=std::move(local);
+        if (!tradeChatFailed) {
+            if (const char* notice=tradeNotices.Peek(now)) {
+                if (const auto chat=NativeMythicSounds::ChatReady(reader,image)) {
+                    AddNativeLocalLine(image+0x200120,chat,notice,tradeChatFailed);
+                    tradeNotices.Pop();
+                }
+            }
+        }
         if (browse) mythicSounds.Browse(browse);
         mythicSounds.Service(reader,image,soundSettings,preview,shown,now,previewVolume);
         wishingWell.Service(reader,image,wellSettings,wellAction,wellInstalled,shown,now,utc);
@@ -737,8 +793,61 @@ static void Observe(unsigned kind, const HookRegisters& registers) {
     }
     if (kind == 8 || kind == 9) {
         std::lock_guard<std::recursive_mutex> lock(stateGate);
-        if (kind == 8) mythicSounds.Drop(reader,image,registers.ebx,WindowsCompat::Milliseconds());
-        else mythicSounds.InventoryDrop(reader,image,registers.esi,WindowsCompat::Milliseconds());
+        const auto now=WindowsCompat::Milliseconds();
+        if (kind==9) {
+            mythicSounds.InventoryDrop(reader,image,registers.esi,now);
+            if (tradeWantedIndex || tradeLocalWatches)
+                tradeDrops.Ignore(registers.esi,reader.Pointer(registers.esi+0x114),now);
+            return;
+        }
+        const auto object=registers.ebx;
+        mythicSounds.Drop(reader,image,object,now);
+        const bool market=tradeWantedIndex && now<tradeWantedIndex->expires && !tradeWantedIndex->definitions.empty();
+        const bool personal=tradeLocalWatches && !tradeLocalWatches->empty();
+        if ((!market && !personal) ||
+            !tradeZone || !reader.InWorld() || tradeZone!=reader.Pointer(reader.Pointer(image+0x5314b0)+0x1b4)) return;
+        bool own=false;
+        uintptr_t ownerName=0;
+        const auto item=NativeMythicSounds::OwnedGroundItem(reader,image,object,own,ownerName);
+        if (!item) return;
+        const auto definition=NativeBankSort::TradeDefinition(reader,item);
+        const auto tier=personal ? TradeAuction::ItemRollTier(reader,item) : 0;
+        const bool personalMatch=personal && tier && TradeAuction::MatchesLocalWatch(
+            *tradeLocalWatches,definition,tier,[&](auto& roll) {
+                return TradeAuction::ReadLocalRoll(reader,image,item,definition,tier,roll);
+            });
+        bool marketMatch=false;
+        std::string signature;
+        if (market) {
+            const auto match=tradeWantedIndex->definitions.find(definition);
+            if (match!=tradeWantedIndex->definitions.end() && TradeAuction::Tradable(reader,image,item)) {
+                signature=TradeAuction::Signature(reader,image,item);
+                marketMatch=match->second.count(signature)!=0;
+            }
+        }
+        if ((!personalMatch && !marketMatch) || !tradeDrops.Push(object,item,now,false)) return;
+        const auto* catalog=FindBankDefinition(definition.c_str());
+        const std::string name=catalog ? catalog->label : "";
+        char link[NativeLocalTextCapacity]{};
+        bool copied=false,marketTracked=false;
+        const auto itemLink=[&]() {
+            if (!copied) CopyNativeItemLink(image+0x97a30,image+0x320925,item,link,tradeLinkFailed);
+            copied=true;
+            return link;
+        };
+        if (personalMatch && !tradeChatFailed)
+            tradeNotices.Push(TradeAuction::LocalWatchNotice(itemLink(),name,tier),now);
+        if (marketMatch) {
+            const auto tracked=tradeWantedIndex->tracked.find(signature);
+            if (tracked!=tradeWantedIndex->tracked.end()) for (const auto& offer:tracked->second) {
+                if (offer.definition!=definition) continue;
+                if (!tradeChatFailed) tradeNotices.Push(TradeAuction::TrackedNotice(itemLink(),name,offer),now);
+                marketTracked=true;
+            }
+        }
+        if (personalMatch || marketTracked) mythicSounds.TrackedDrop(reader,image,object,item,now);
+        else if (marketMatch && !tradeChatFailed) tradeNotices.Push("Trade Auction: "+TradeAuction::ChatPhrase(name,"An item")+
+            " dropped. Someone is looking for this exact item.",now);
         return;
     }
     if (kind == 0) {
@@ -821,6 +930,8 @@ static void Observe(unsigned kind, const HookRegisters& registers) {
     if (kind == 4) {
         if (!uiPrepared || !reader.InWorld()) RefreshUi(reader);
         MeterOverlayMoveSettings(nullptr,&moveLayout.Frame());
+        static SallySam::Tracker vendors;
+        MeterOverlaySallySam(vendors.Update(reader,image,MeterOverlaySallySamEnabled(),WindowsCompat::Milliseconds()));
         MeterOverlayEndFrame();
         SyncMenuFrame(reader);
         uiPrepared = false;
@@ -854,6 +965,12 @@ static void Observe(unsigned kind, const HookRegisters& registers) {
         if (layer == AddonUiLayer::CharacterSheet) {
             const auto frame = MeterOverlayCharacterSheetEnabled() ? characterSheet.Frame(reader,image,WindowsCompat::Milliseconds()) : CharacterSheetFrame{};
             MeterOverlayCharacterSheet(&frame);
+        }
+        if (layer==AddonUiLayer::Inventory && tradeNativeAvailable && MeterOverlayTradeEnabled()) {
+            static uintptr_t currency=0;
+            bool held=false;
+            const auto storage=NativeBankSort::TradeStorage(reader,image,held);
+            MeterOverlayTradeGeometry(NativeBankSort::TradeGeometry(reader,image,currency),storage,held,image,&TradeAuction::Inflate);
         }
         if (layer == AddonUiLayer::Effects) {
             if (!MoveProjectionTarget) DrawEffectTimers(reader);
@@ -982,6 +1099,9 @@ static BOOL CALLBACK InitializeAddon() {
         if (!VerifyCatalog(directory)) throw std::runtime_error("Skill data identity differs; addon disabled");
         image = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
         const NativeReader reader(image,CopyMemoryChecked,LookupLabel);
+        tradeNativeAvailable=TradeAuction::SupportsNativeItemView(reader,image);
+        tradeLocalAvailable=tradeNativeAvailable && TradeAuction::SupportsLocalRolls(reader,image);
+        tradeHoverAvailable=TradeAuction::SupportsNativeHover(reader,image);
         const bool mouseLookCompatible = MouseLookProfileMatches(reader,image);
         const bool enhancedZoomCompatible = EnhancedZoomProfileMatches(reader,image);
         const bool chatTimestampsCompatible = ChatTimestampProfileMatches(reader,image);
@@ -990,6 +1110,7 @@ static BOOL CALLBACK InitializeAddon() {
         wishingWell.Configure(directory / L"Addons" / L"WishingWellTracker");
         history.Open(addon / L"history.bin");
         if (!MeterOverlayStart(settings.c_str())) throw std::runtime_error("UI initialization failed; addon disabled");
+        MeterOverlayTradeLocalAvailable(tradeLocalAvailable);
         MeterOverlayWorld(false);
         MeterOverlayInputTest(OverlayInput);
         MeterOverlayHotkeyTest(OverlayHotkey);

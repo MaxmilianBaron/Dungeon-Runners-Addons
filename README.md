@@ -32,6 +32,8 @@
 - **Moveeverything** — Move and resize interface elements.
 - **Cursor Circle** — Adjustable combat cursor highlight.
 - **Loadouts & Sorting** — Gear and hotbar saves; Inventory and selected bank page sorting.
+- **Trade Auction** — Turn on in Enhanced Settings and open below the gold total in Inventory. List tradable items or post a request for a catalog item with supported stat and bonus combinations. Track an offer with an exact wanted item for Info alerts.
+- **Sally & Sam Finder** — Shows loaded Sally and Sam variants on the minimap and map. On by default in Enhanced Settings.
 - **Leaderboard** — Official PvE rankings and PvP Rating; all time or this week.
 - **Controller** — Xbox/XInput and PS5 DualSense movement, combat and menus, with Xbox or PlayStation button labels. Steam Deck uses the Steam Input Gamepad template.
 - **Enhanced Settings** — Camera, attack controls, low-HP warning and optional local chat timestamps in `[HH:mm]` format.

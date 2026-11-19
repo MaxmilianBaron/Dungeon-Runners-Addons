@@ -4,6 +4,7 @@
 #include <cctype>
 #include <cstdint>
 #include <set>
+#include <stdexcept>
 #include <string>
 #include <tuple>
 #include <unordered_set>
@@ -818,7 +819,7 @@ class BankSortSession {
     BankLayout current, expected;
     std::vector<BankStep> steps;
     size_t index = 0;
-    uint64_t sentAt = 0, nextSend = 0;
+    uint64_t sentAt = 0, nextSend = 0, acknowledgementTimeout = 5000;
     bool busy = false, pending = false, cancel = false, recovering = false, sendFailed = false;
     BankPosition returnPosition;
     std::set<int> recoveryPages;
@@ -894,6 +895,7 @@ class BankSortSession {
         return true;
     }
 public:
+    void AcknowledgementTimeout(uint64_t value) { if(value<1000 || value>60000)throw std::invalid_argument("Invalid sorting acknowledgement timeout.");acknowledgementTimeout=value; }
     bool Busy() const { return busy; }
     size_t Completed() const { return index; }
     size_t Total() const { return steps.size(); }
@@ -926,7 +928,7 @@ public:
             if (!complete && !(observed == current) && !MatchUpdate(observed,complete)) { Stop("Stopped: bank contents changed. Check the item on your cursor."); return nullptr; }
             if (complete) { current = expected; pending = sendFailed = false; ++index; nextSend = now; }
             else {
-                if (!sendFailed && now - sentAt < 5000) return nullptr;
+                if (!sendFailed && now - sentAt < acknowledgementTimeout) return nullptr;
                 if (!Recover(observed,now)) { Stop("Stopped: move was not confirmed. Check the item on your cursor."); return nullptr; }
             }
         }

@@ -8,11 +8,20 @@
 #include "extension_api.h"
 
 class AddonRegistry {
+public:
+    struct QuickToggle {
+        size_t extension;
+        unsigned option;
+        std::string label;
+    };
+private:
     std::vector<ExtensionDefinition> extensions;
     std::vector<ExtensionSettings> settings;
     std::vector<ExtensionGetStatus> statuses;
+    std::vector<QuickToggle> quickToggles;
     bool damage = false, money = false, cooldowns = false, nameplates = false, characterSheet = false, mythicSounds = false, wishingWell = false, combatCursor = false, bankSort = false, moveEverything = false, loadouts = false, leaderboard = false;
     bool controller = false, lowHp = false, unbindLeft = false, enhanced = false;
+    bool tradeAuction = false, sallySam = false;
     unsigned rejected = 0;
 
     static bool Plain(const char* value,size_t size) {
@@ -68,7 +77,9 @@ public:
         return true;
     }
     void Discover(const std::filesystem::path& root) {
-        extensions.clear(); settings.clear(); statuses.clear(); damage=money=cooldowns=nameplates=characterSheet=mythicSounds=wishingWell=combatCursor=bankSort=moveEverything=loadouts=leaderboard=controller=lowHp=unbindLeft=enhanced=false; rejected=0;
+        tradeAuction=sallySam=false;
+        extensions.clear(); settings.clear(); statuses.clear(); quickToggles.clear();
+        damage=money=cooldowns=nameplates=characterSheet=mythicSounds=wishingWell=combatCursor=bankSort=moveEverything=loadouts=leaderboard=controller=lowHp=unbindLeft=enhanced=false; rejected=0;
         std::error_code error;
         if (!Regular(root,true)) return;
         std::vector<std::filesystem::path> directories;
@@ -94,6 +105,14 @@ public:
             if (builtin=="Moveeverything" && id=="moveeverything") { moveEverything=true; continue; }
             if (builtin=="Loadouts" && id=="loadouts") { loadouts=bankSort=true; continue; }
             if (builtin=="Leaderboard" && id=="leaderboard") { leaderboard=true; continue; }
+            if (builtin=="TradeAuction" && id=="trade-auction" && directory.filename()==L"TradeAuction") {
+                tradeAuction=true; continue;
+            }
+            if (id=="trade-auction") { ++rejected; continue; }
+            if (builtin=="SallySamFinder" && id=="sally-sam-finder" && directory.filename()==L"SallySamFinder") {
+                sallySam=true; continue;
+            }
+            if (id=="sally-sam-finder") { ++rejected; continue; }
             if (builtin=="Controller" && id=="controller") { controller=true; continue; }
             if (builtin=="LowHPWarning" && id=="low-hp-warning") { lowHp=true; continue; }
             if (builtin=="UnbindLeftClick" && id=="unbind-left-click") { unbindLeft=true; continue; }
@@ -123,7 +142,19 @@ public:
                 advanced.size=sizeof(advanced); advanced.version=ExtensionSettingsVersion;
                 valid=InitializeSettings(getSettings,&advanced) && ValidSettings(advanced);
             }
-            if (valid) { extensions.push_back(result); settings.push_back(advanced); statuses.push_back(reinterpret_cast<ExtensionGetStatus>(GetProcAddress(module,"DungeonRunnersAddonGetStatus"))); }
+            if (valid) {
+                const auto toggle=Property(manifest,"EnhancedToggle");
+                const unsigned option=toggle.size()==1 && toggle.front()>='1' && toggle.front()<='4' ?
+                    static_cast<unsigned>(toggle.front()-'1') : result.optionCount;
+                if (option<result.optionCount) {
+                    auto label=Property(manifest,"EnhancedLabel");
+                    if (label.empty() || label.size()>31 || !Plain(label.c_str(),label.size()+1)) label=result.name;
+                    quickToggles.push_back({extensions.size(),option,std::move(label)});
+                }
+                extensions.push_back(result);
+                settings.push_back(advanced);
+                statuses.push_back(reinterpret_cast<ExtensionGetStatus>(GetProcAddress(module,"DungeonRunnersAddonGetStatus")));
+            }
             else ++rejected;
         }
     }
@@ -138,6 +169,8 @@ public:
     bool MoveEverything() const { return moveEverything; }
     bool Loadouts() const { return loadouts; }
     bool Leaderboard() const { return leaderboard; }
+    bool TradeAuction() const { return tradeAuction; }
+    bool SallySam() const { return sallySam; }
     bool ControllerEnabled() const { return controller; }
     bool Enhanced() const { return enhanced || lowHp || unbindLeft; }
     bool LowHp() const { return Enhanced(); }
@@ -145,6 +178,7 @@ public:
     bool Nameplates() const { return nameplates; }
     unsigned Rejected() const { return rejected; }
     const std::vector<ExtensionDefinition>& Extensions() const { return extensions; }
+    const std::vector<QuickToggle>& EnhancedToggles() const { return quickToggles; }
     bool Status(const ExtensionDefinition& item,char* text,uint32_t capacity) const {
         if (!text || capacity < 2) return false;
         text[0] = 0;

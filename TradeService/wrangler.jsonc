@@ -1,0 +1,18 @@
+{
+  "name": "dungeon-runners-trade-auction",
+  "main": "worker.js",
+  "compatibility_date": "2026-09-28",
+  "workers_dev": true,
+  "triggers": {"crons": ["37 2 * * *"]},
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "dungeon-runners-trade-auction",
+      "database_id": "00000000-0000-0000-0000-000000000000"
+    }
+  ],
+  "ratelimits": [
+    {"name": "IDENTITY_LIMIT", "namespace_id": "91084631", "simple": {"limit": 10, "period": 60}},
+    {"name": "WRITE_LIMIT", "namespace_id": "91084632", "simple": {"limit": 20, "period": 60}}
+  ]
+}

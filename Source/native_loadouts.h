@@ -265,9 +265,10 @@ public:
         bankChanged=sortRequested=false;
     }
     void Service(const NativeReader& r,uintptr_t image,bool enabled,const LoadoutCommand& command,bool focused,bool bankBusy,uint64_t now) {
+        static_cast<void>(focused);
         const bool action=command.kind!=LoadoutCommand::Kind::None;
         if (command.kind==LoadoutCommand::Kind::Capture) { frame.captured=false; frame.equipment={}; ++frame.response; frame.message="Equipment could not be saved. Open Inventory and try again."; }
-        if (frame.busy && (!enabled || !focused || command.kind==LoadoutCommand::Kind::Cancel || bankBusy)) { cancelled=true; reason="Equipment change cancelled."; }
+        if (frame.busy && (!enabled || command.kind==LoadoutCommand::Kind::Cancel || bankBusy)) { cancelled=true; reason="Equipment change cancelled."; }
         if (!enabled && !frame.busy) { frame.visible=false; return; }
         if (now<nextSample && !action) return;
         nextSample=frame.busy ? now : now+200;
@@ -285,7 +286,7 @@ public:
             frame.message="Hotbar could not be read. Open Inventory and try again."; return;
         }
         if (!frame.busy) {
-            if (!action || !frame.visible || !focused || command.owner!=frame.owner) return;
+            if (!action || !frame.visible || command.owner!=frame.owner) return;
             if (command.kind==LoadoutCommand::Kind::Capture) { Capture(image,sample); return; }
             if (command.kind!=LoadoutCommand::Kind::Equip) return;
             if (bankBusy) { frame.message="Wait for bank sorting to finish."; return; }

@@ -1,10 +1,41 @@
 #pragma once
 #include "windows_compat.h"
 
+struct EnhancedToggleDraft { int original, value; };
+static std::vector<EnhancedToggleDraft> enhancedToggleDraft;
+
+static float EnhancedExtraHeight() {
+    return 38.0f*static_cast<float>(addonRegistry.EnhancedToggles().size()+(addonRegistry.TradeAuction() ? 1u : 0u)+(addonRegistry.SallySam() ? 1u : 0u));
+}
+
 static void OpenEnhancedSettings() {
-    draftEnhancedOptions = {lowHpOptions,unbindOptions.enabled,mouseLookEnabled,enhancedZoomEnabled,chatTimestampsEnabled};
+    draftEnhancedOptions = {lowHpOptions,unbindOptions.enabled,mouseLookEnabled,enhancedZoomEnabled,chatTimestampsEnabled,tradeEnabled,sallySamEnabled};
     enhancedMessage.clear();
     lowHpPreviewUntil = 0;
+    enhancedToggleDraft.clear();
+    for (const auto& toggle:addonRegistry.EnhancedToggles()) {
+        const auto& extension=addonRegistry.Extensions()[toggle.extension];
+        const int value=AddonRegistry::Read(extension,toggle.option);
+        enhancedToggleDraft.push_back({value,value});
+    }
+}
+
+static bool ApplyEnhancedToggles() {
+    const auto& toggles=addonRegistry.EnhancedToggles();
+    for (size_t i=0;i<toggles.size();++i) {
+        auto& draft=enhancedToggleDraft[i];
+        if (draft.value==draft.original) continue;
+        const auto& toggle=toggles[i];
+        const auto& extension=addonRegistry.Extensions()[toggle.extension];
+        std::array<int,4> values{};
+        for (unsigned index=0;index<extension.optionCount;++index) {
+            values[index]=index==toggle.option ? draft.value : AddonRegistry::Read(extension,index);
+            if (values[index]<0) return false;
+        }
+        if (!AddonRegistry::Apply(extension,values.data())) return false;
+        draft.original=draft.value;
+    }
+    return true;
 }
 
 static void DrawEnhancedSettings(UiPoint origin,UiPoint scale) {
@@ -31,10 +62,32 @@ static void DrawEnhancedSettings(UiPoint origin,UiPoint scale) {
     if (OptionRow("Chat timestamps:",draftEnhancedOptions.chatTimestamps ? "On" : "Off",point(10,286),scale,
         chatTimestampsAvailable ? "Adds local time [HH:mm] to new chat messages." : "Unavailable: client chat code differs.",point(355,286),origin.x) && chatTimestampsAvailable)
         draftEnhancedOptions.chatTimestamps = !draftEnhancedOptions.chatTimestamps;
-    BodyText(draw,"Each option works independently. Mouse look uses the game's camera controls. Preview shows the HP warning for 5 seconds.",point(34,334),UiPoint(scale.x*.85f,scale.y*.85f),BodyColor,280 * scale.x);
-    if (DrawSkinControl("Preview",point(104,400),scale)) lowHpPreviewUntil = WindowsCompat::Milliseconds() + 5000;
-    if (!enhancedMessage.empty()) BodyText(draw,enhancedMessage.c_str(),point(34,447),UiPoint(scale.x*.85f,scale.y*.85f),GoldColor,282 * scale.x);
-    if (DrawSkinControl("Okay",point(24,476),scale,&okayRect)) {
+    const bool hasTrade=addonRegistry.TradeAuction();
+    if (hasTrade && OptionRow("Trade Auction:",draftEnhancedOptions.tradeAuction ? "On" : "Off",point(10,324),scale,
+        "Shows Trade Auction under your gold in Inventory and enables exact drop alerts.",point(355,324),origin.x))
+        draftEnhancedOptions.tradeAuction = !draftEnhancedOptions.tradeAuction;
+    const bool hasSallySam=addonRegistry.SallySam();
+    const float vendorY=hasTrade ? 362.f : 324.f;
+    if (hasSallySam && OptionRow("Sally & Sam Finder:",draftEnhancedOptions.sallySam ? "On" : "Off",point(10,vendorY),scale,
+        "Shows loaded Sally and Sam vendors on the minimap and map.",point(355,vendorY),origin.x))
+        draftEnhancedOptions.sallySam = !draftEnhancedOptions.sallySam;
+    const auto& toggles=addonRegistry.EnhancedToggles();
+    for (size_t i=0;i<toggles.size();++i) {
+        const auto& toggle=toggles[i];
+        const auto& extension=addonRegistry.Extensions()[toggle.extension];
+        auto& draft=enhancedToggleDraft[i];
+        const float y=324+38.0f*static_cast<float>(i+(hasTrade ? 1u : 0u)+(hasSallySam ? 1u : 0u));
+        Ui::PushID(static_cast<int>(i));
+        if (OptionRow(toggle.label.c_str(),draft.value<0 ? "Unavailable" : draft.value ? "On" : "Off",
+            point(10,y),scale,extension.options[toggle.option].help,point(355,y),origin.x) && draft.value>=0)
+            draft.value^=1;
+        Ui::PopID();
+    }
+    const float extra=EnhancedExtraHeight();
+    BodyText(draw,"Each option works independently. Mouse look uses the game's camera controls. Preview shows the HP warning for 5 seconds.",point(34,334+extra),UiPoint(scale.x*.85f,scale.y*.85f),BodyColor,280 * scale.x);
+    if (DrawSkinControl("Preview",point(104,400+extra),scale)) lowHpPreviewUntil = WindowsCompat::Milliseconds() + 5000;
+    if (!enhancedMessage.empty()) BodyText(draw,enhancedMessage.c_str(),point(34,447+extra),UiPoint(scale.x*.85f,scale.y*.85f),GoldColor,282 * scale.x);
+    if (DrawSkinControl("Okay",point(24,476+extra),scale,&okayRect)) {
         if (SaveAddonOptions(enhancedSettings,draftEnhancedOptions)) {
             MeterMouseLookRelease();
             lowHpOptions = draftEnhancedOptions.health;
@@ -42,11 +95,15 @@ static void DrawEnhancedSettings(UiPoint origin,UiPoint scale) {
             mouseLookEnabled = draftEnhancedOptions.mouseLook;
             enhancedZoomEnabled = draftEnhancedOptions.enhancedZoom;
             chatTimestampsEnabled = draftEnhancedOptions.chatTimestamps;
+            tradeEnabled = draftEnhancedOptions.tradeAuction;
+            sallySamEnabled = draftEnhancedOptions.sallySam;
+            if (!tradeEnabled) CloseTrade();
             lowHpPreviewUntil = 0;
-            activeAddon = nullptr;
+            if (ApplyEnhancedToggles()) activeAddon = nullptr;
+            else enhancedMessage = "An addon setting could not be applied.";
         } else enhancedMessage = "Settings could not be saved.";
     }
-    if (DrawSkinControl("Back",point(185,476),scale,&cancelRect)) { lowHpPreviewUntil = 0; activeAddon = nullptr; }
+    if (DrawSkinControl("Back",point(185,476+extra),scale,&cancelRect)) { lowHpPreviewUntil = 0; activeAddon = nullptr; }
 }
 
 static void DrawLowHpWarning(uint64_t now) {

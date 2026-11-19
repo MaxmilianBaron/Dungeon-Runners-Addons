@@ -84,6 +84,14 @@ class NativeMythicSounds {
         return containsSelf && containsOwner;
     }
 public:
+    static uintptr_t OwnedGroundItem(const NativeReader& r,uintptr_t image,uintptr_t object,bool& own,uintptr_t& name) {
+        if (r.Pointer(object)!=image+0x4928c8) return 0;
+        uint8_t state=255;
+        uint32_t owner=0;
+        const auto item=r.Pointer(object+0x114);
+        return item && r.Read(object+0x101,state) && state==0 && r.Read(object+0x104,owner) &&
+            Owned(r,image,owner,own,name) ? item : 0;
+    }
     static uintptr_t ChatReady(const NativeReader& r,uintptr_t image) {
         const uintptr_t ui = r.Pointer(image+0x5314b0), control = r.Pointer(ui+0x21c);
         if (!control || r.Pointer(control) != image+0x449b30) return 0;
@@ -160,14 +168,16 @@ public:
     void Browse(HWND owner) { custom.Select(owner); }
     CustomSoundStatus CustomStatus() const { return custom.Status(); }
     bool TakeCustomImport() { return custom.TakeImported(); }
+    void TrackedDrop(const NativeReader& r,uintptr_t image,uintptr_t object,uintptr_t item,uint64_t now) {
+        if (soundEnabled && (!failed || customSelected) && Dungeon(r,image))
+            queue.Push(object,item,now,true);
+    }
     bool Drop(const NativeReader& r,uintptr_t image,uintptr_t object,uint64_t now) {
-        if (!(soundEnabled || announcementsEnabled) || !Dungeon(r,image) || r.Pointer(object) != image+0x4928c8) return false;
-        uint8_t state = 255;
-        uint32_t owner = 0;
+        if (!(soundEnabled || announcementsEnabled) || !Dungeon(r,image)) return false;
         bool own = false;
         uintptr_t name = 0;
-        const uintptr_t item = r.Pointer(object+0x114);
-        if (!item || !r.Read(object+0x101,state) || state != 0 || !r.Read(object+0x104,owner) || !Owned(r,image,owner,own,name) || !Unbound(r,item) || !Mythic(r,image,item) || !queue.Push(object,item,now,soundEnabled && (!failed || customSelected))) return false;
+        const uintptr_t item = OwnedGroundItem(r,image,object,own,name);
+        if (!item || !Unbound(r,item) || !Mythic(r,image,item) || !queue.Push(object,item,now,soundEnabled && (!failed || customSelected))) return false;
         if (announcementsEnabled && !chatFailed) {
             char link[NativeLocalTextCapacity]{};
             CopyNativeItemLink(image+0x97a30,image+0x320925,item,link,linkFailed);

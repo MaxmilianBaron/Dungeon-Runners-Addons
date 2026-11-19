@@ -1,5 +1,6 @@
 #include "../windows_compat.h"
 #include "ui.h"
+#include "layout.h"
 #include <windowsx.h>
 #include <algorithm>
 #include <array>
@@ -34,7 +35,7 @@ struct UiFont::Data {
     HGDIOBJ oldFont=nullptr,oldBitmap=nullptr;
     uint32_t* pixels=nullptr;
     float height=64,emHeight=64;
-    unsigned slot=0;
+    unsigned slot=0,cellSize=128;
     std::vector<IDirect3DTexture9*> pages;
     std::map<uint32_t,UiGlyph> glyphs;
     UiTexture atlas=nullptr;
@@ -52,15 +53,15 @@ struct UiFont::Data {
 };
 UiFont::UiFont():data(std::make_unique<Data>()) {}
 UiFont::~UiFont()=default;
-bool UiFont::Load(IDirect3DDevice9* device,const unsigned char* bytes,size_t size) {
-    if (!device || !bytes || size<1024 || size>16*1024*1024 || data->resource || data->atlas) return false;
+bool UiFont::Load(IDirect3DDevice9* device,const unsigned char* bytes,size_t size,int emPixels) {
+    if (!device || !bytes || size<1024 || size>16*1024*1024 || emPixels<8 || emPixels>56 || data->resource || data->atlas) return false;
     auto next=std::make_unique<Data>();
     DWORD fonts=0;
     next->resource=AddFontMemResourceEx(const_cast<unsigned char*>(bytes),static_cast<DWORD>(size),nullptr,&fonts);
     if (!next->resource || !fonts) return false;
     next->device=device;
     next->dc=CreateCompatibleDC(nullptr);
-    next->font=CreateFontW(-56,0,0,0,FW_NORMAL,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_TT_ONLY_PRECIS,CLIP_DEFAULT_PRECIS,ANTIALIASED_QUALITY,DEFAULT_PITCH,L"Sylfaen");
+    next->font=CreateFontW(-emPixels,0,0,0,FW_NORMAL,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_TT_ONLY_PRECIS,CLIP_DEFAULT_PRECIS,ANTIALIASED_QUALITY,DEFAULT_PITCH,L"Sylfaen");
     BITMAPINFO info{}; info.bmiHeader.biSize=sizeof(BITMAPINFOHEADER); info.bmiHeader.biWidth=128; info.bmiHeader.biHeight=-128;
     info.bmiHeader.biPlanes=1; info.bmiHeader.biBitCount=32; info.bmiHeader.biCompression=BI_RGB;
     if (next->dc) next->bitmap=CreateDIBSection(next->dc,&info,DIB_RGB_COLORS,reinterpret_cast<void**>(&next->pixels),nullptr,0);
@@ -71,6 +72,11 @@ bool UiFont::Load(IDirect3DDevice9* device,const unsigned char* bytes,size_t siz
         metrics.tmInternalLeading<0 || metrics.tmInternalLeading>=metrics.tmHeight) return false;
     next->height=static_cast<float>(metrics.tmHeight);
     next->emHeight=static_cast<float>(metrics.tmHeight-metrics.tmInternalLeading);
+    if (emPixels<56) {
+        const auto needed=std::max(metrics.tmHeight,metrics.tmMaxCharWidth+8);
+        if (needed<=32) next->cellSize=32;
+        else if (needed<=64) next->cellSize=64;
+    }
     SetTextColor(next->dc,RGB(255,255,255)); SetBkColor(next->dc,0); SetBkMode(next->dc,OPAQUE);
     data=std::move(next);
     return true;
@@ -117,30 +123,32 @@ const UiGlyph& UiFont::Glyph(uint32_t code) {
     else chars[0]=static_cast<wchar_t>(code);
     SIZE extent{};
     if (!GetTextExtentPoint32W(data->dc,chars,length,&extent)) return data->glyphs.emplace(code,glyph).first->second;
-    glyph.advance=static_cast<float>(std::clamp(extent.cx,0L,120L));
+    const auto cell=data->cellSize;
+    const auto pageSize=16*cell;
+    glyph.advance=static_cast<float>(std::clamp(extent.cx,0L,static_cast<LONG>(cell)-8));
     const unsigned index=data->slot/256, slot=data->slot%256;
     if (index>=data->pages.size()) {
         IDirect3DTexture9* page=nullptr;
-        if (FAILED(data->device->CreateTexture(2048,2048,1,0,D3DFMT_A8R8G8B8,D3DPOOL_MANAGED,&page,nullptr))) return data->glyphs.emplace(code,glyph).first->second;
+        if (FAILED(data->device->CreateTexture(pageSize,pageSize,1,0,D3DFMT_A8R8G8B8,D3DPOOL_MANAGED,&page,nullptr))) return data->glyphs.emplace(code,glyph).first->second;
         D3DLOCKED_RECT lock{};
         if (FAILED(page->LockRect(0,&lock,nullptr,0))) { page->Release(); return data->glyphs.emplace(code,glyph).first->second; }
-        for (unsigned y=0;y<2048;++y) std::memset(static_cast<unsigned char*>(lock.pBits)+y*lock.Pitch,0,2048*4);
+        for (unsigned y=0;y<pageSize;++y) std::memset(static_cast<unsigned char*>(lock.pBits)+y*lock.Pitch,0,pageSize*4);
         page->UnlockRect(0);
         const auto release=[](IDirect3DTexture9* texture) { texture->Release(); };
         std::unique_ptr<IDirect3DTexture9,decltype(release)> owner(page,release);
         data->pages.push_back(page); owner.release();
     }
     std::memset(data->pixels,0,128*128*4);
-    RECT box{0,0,128,128};
+    RECT box{0,0,static_cast<LONG>(cell),static_cast<LONG>(cell)};
     ExtTextOutW(data->dc,2,0,ETO_CLIPPED|ETO_OPAQUE,&box,chars,length,nullptr);
     GdiFlush();
-    const LONG x=static_cast<LONG>(slot%16)*128,y=static_cast<LONG>(slot/16)*128;
-    RECT area{x,y,x+128,y+128}; D3DLOCKED_RECT lock{};
+    const LONG x=static_cast<LONG>(slot%16*cell),y=static_cast<LONG>(slot/16*cell);
+    RECT area{x,y,x+box.right,y+box.bottom}; D3DLOCKED_RECT lock{};
     auto* page=data->pages[index];
     if (FAILED(page->LockRect(0,&lock,&area,0))) return data->glyphs.emplace(code,glyph).first->second;
-    for (unsigned row=0;row<128;++row) {
+    for (unsigned row=0;row<cell;++row) {
         auto* target=reinterpret_cast<uint32_t*>(static_cast<unsigned char*>(lock.pBits)+row*lock.Pitch);
-        for (unsigned col=0;col<128;++col) {
+        for (unsigned col=0;col<cell;++col) {
             const uint32_t pixel=data->pixels[row*128+col];
             const uint32_t alpha=std::max({pixel&255,(pixel>>8)&255,(pixel>>16)&255});
             target[col]=(alpha<<24)|0x00ffffff;
@@ -148,7 +156,8 @@ const UiGlyph& UiFont::Glyph(uint32_t code) {
     }
     page->UnlockRect(0); ++data->slot;
     glyph.texture=page; glyph.width=glyph.advance+4; glyph.height=data->height;
-    glyph.uv0={x/2048.0f,y/2048.0f}; glyph.uv1={(x+glyph.width)/2048.0f,(y+glyph.height)/2048.0f};
+    const auto pixels=static_cast<float>(pageSize);
+    glyph.uv0={x/pixels,y/pixels}; glyph.uv1={(x+glyph.width)/pixels,(y+glyph.height)/pixels};
     return data->glyphs.emplace(code,glyph).first->second;
 }
 
@@ -222,6 +231,7 @@ struct UiWindow {
     std::string key,root;
     UiPoint position,size,cursor;
     UiRect clip;
+    UiWindowAnchor anchor;
     float scroll=0,content=0,maxY=0;
     bool initialized=false,child=false;
     int flags=0;
@@ -256,7 +266,9 @@ static void SaveWindows(UiContext& state) {
     for (const auto& pair:state.windows) {
         const auto& window=pair.second;
         if (!window.initialized || window.child || (window.flags&Ui::NoSavedSettings)) continue;
-        output<<"[Window]["<<pair.first<<"]\nPos="<<static_cast<int>(window.position.x)<<','<<static_cast<int>(window.position.y)<<"\nSize="<<static_cast<int>(window.size.x)<<','<<static_cast<int>(window.size.y)<<"\n\n";
+        output<<"[Window]["<<pair.first<<"]\nPos="<<static_cast<int>(window.position.x)<<','<<static_cast<int>(window.position.y)<<"\nSize="<<static_cast<int>(window.size.x)<<','<<static_cast<int>(window.size.y)<<'\n';
+        if (window.anchor.saved) output<<"Anchor="<<std::lround(window.anchor.fraction.x*1000000)<<','<<std::lround(window.anchor.fraction.y*1000000)<<'\n';
+        output<<'\n';
     }
     output.close();
     if (output.good() && MoveFileExW(pending.c_str(),path.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)) state.dirty=false;
@@ -275,6 +287,12 @@ UiContext* Ui::CreateContext(HWND window,IDirect3DDevice9* device,const char* se
                 if (state->windows.size()>=64 && state->windows.find(key)==state->windows.end()) continue;
                 auto& saved=state->windows[key]; saved.key=key; saved.position={static_cast<float>(x),static_cast<float>(y)}; saved.initialized=true;
             }
+        } else if (!key.empty() && line.rfind("Anchor=",0)==0) {
+            const auto entry=state->windows.find(key);
+            int x=0,y=0;
+            if (entry!=state->windows.end() && sscanf_s(line.c_str()+7,"%d,%d",&x,&y)==2 &&
+                x>=0 && x<=1000000 && y>=0 && y<=1000000)
+                entry->second.anchor={{x/1000000.0f,y/1000000.0f},true};
         }
     }
     return state.release();
@@ -311,7 +329,11 @@ void Ui::NewFrame() {
     state.down=state.pendingDown; state.up=state.pendingUp; state.doubleClick=state.pendingDouble; state.wheel=state.pendingWheel;
     state.pendingDown=state.pendingUp=state.pendingDouble=false; state.pendingWheel=0;
     state.hoveredRoot.clear();
-    for (auto it=state.order.rbegin();it!=state.order.rend();++it) { const auto& w=state.windows.at(*it); if (!(w.flags&NoInputs) && Contains({w.position,{w.position.x+w.size.x,w.position.y+w.size.y}},state.io.MousePos)) { state.hoveredRoot=*it; break; } }
+    for (auto it=state.order.rbegin();it!=state.order.rend();++it) {
+        const auto& w=state.windows.at(*it);
+        const auto pos=(w.flags&KeepInView) && w.anchor.saved ? w.anchor.Resolve(state.io.DisplaySize,w.size) : w.position;
+        if (!(w.flags&NoInputs) && Contains({pos,{pos.x+w.size.x,pos.y+w.size.y}},state.io.MousePos)) { state.hoveredRoot=*it; break; }
+    }
     state.order.clear(); state.stack.clear(); state.ids.clear(); state.disabled.clear(); state.draw.Clear(state.io.DisplaySize); state.foreground.Clear(state.io.DisplaySize);
 }
 void Ui::SetNextWindowPos(UiPoint pos,int condition,UiPoint pivot) { current->nextPos=pos; current->pivot=pivot; current->hasPos=true; current->firstOnly=condition==FirstUse; }
@@ -319,7 +341,15 @@ void Ui::SetNextWindowSize(UiPoint size) { current->nextSize=size; current->hasS
 bool Ui::Begin(const char* name,bool*,int flags) {
     auto& state=*current; auto& window=state.windows[name]; window.key=name; window.root=name; window.flags=flags; window.child=false;
     if (state.hasSize) window.size=state.nextSize;
-    if (state.hasPos && (!state.firstOnly || !window.initialized)) window.position={state.nextPos.x-window.size.x*state.pivot.x,state.nextPos.y-window.size.y*state.pivot.y};
+    const bool placed=state.hasPos && (!state.firstOnly || !window.initialized);
+    if (placed) window.position={state.nextPos.x-window.size.x*state.pivot.x,state.nextPos.y-window.size.y*state.pivot.y};
+    if ((flags&KeepInView) && state.io.DisplaySize.x>0 && state.io.DisplaySize.y>0) {
+        if (placed || !window.anchor.saved) {
+            window.anchor.Capture(window.position,state.io.DisplaySize,window.size);
+            if (!(flags&NoSavedSettings)) state.dirty=true;
+        }
+        window.position=window.anchor.Resolve(state.io.DisplaySize,window.size);
+    }
     if (!window.initialized && !(flags&NoSavedSettings)) state.dirty=true;
     window.initialized=true; window.cursor=window.position; window.clip=Intersection({window.position,{window.position.x+window.size.x,window.position.y+window.size.y}},{{0,0},state.io.DisplaySize});
     state.hasSize=state.hasPos=false; state.order.push_back(name); state.stack.push_back(&window); state.draw.PushClipRect(window.clip.min,window.clip.max); return true;
@@ -329,6 +359,7 @@ UiPoint Ui::GetWindowPos() { return Window().position; }
 UiPoint Ui::GetWindowSize() { return Window().size; }
 void Ui::SetWindowPos(UiPoint pos) {
     auto& window=Window(); if (window.position.x==pos.x && window.position.y==pos.y) return;
+    if (window.flags&KeepInView) window.anchor.Capture(pos,current->io.DisplaySize,window.size);
     window.position=pos; window.clip=Intersection({pos,{pos.x+window.size.x,pos.y+window.size.y}},{{0,0},current->io.DisplaySize});
     current->draw.PopClipRect(); current->draw.PushClipRect(window.clip.min,window.clip.max); if (!(window.flags&NoSavedSettings)) current->dirty=true;
 }

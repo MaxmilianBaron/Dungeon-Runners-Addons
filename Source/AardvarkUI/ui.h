@@ -20,7 +20,7 @@ class UiFont {
 public:
     UiFont();
     ~UiFont();
-    bool Load(IDirect3DDevice9*,const unsigned char*,size_t);
+    bool Load(IDirect3DDevice9*,const unsigned char*,size_t,int emPixels=56);
     bool LoadAtlas(UiTexture,const unsigned char*,size_t,UiFont*);
     const UiGlyph& Glyph(uint32_t);
     UiPoint CalcTextSizeA(float,float,float,const char*);
@@ -49,7 +49,7 @@ struct UiInput {
 };
 struct UiContext;
 namespace Ui {
-    constexpr int NoInputs=1, NoSavedSettings=2, FirstUse=1;
+    constexpr int NoInputs=1, NoSavedSettings=2, KeepInView=4, FirstUse=1;
     UiContext* CreateContext(HWND,IDirect3DDevice9*,const char*);
     void DestroyContext(UiContext*);
     void SetCurrentContext(UiContext*);

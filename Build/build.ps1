@@ -56,7 +56,7 @@ foreach ($library in @('d3d9.dll','Addons.dll')) {
 }
 Get-Item -LiteralPath (Join-Path $OutputDirectory 'd3d9.dll'),(Join-Path $OutputDirectory 'Addons.dll') | Select-Object FullName,Length
 
-foreach ($addon in @('DamageMeter','HideGoldLabels','CooldownTimers','Nameplates','BetterCharacterSheet','MythicDropSounds','WishingWellTracker','CursorCircle','SortBankPages','Moveeverything','Loadouts','Leaderboard','Controller','EnhancedSettings')) {
+foreach ($addon in @('DamageMeter','HideGoldLabels','CooldownTimers','Nameplates','BetterCharacterSheet','MythicDropSounds','WishingWellTracker','CursorCircle','SortBankPages','Moveeverything','Loadouts','Leaderboard','Controller','EnhancedSettings','TradeAuction','SallySamFinder')) {
     $destination = Join-Path $OutputDirectory ("Addons\"+$addon)
     New-Item -ItemType Directory -Path $destination -Force | Out-Null
     Copy-Item -LiteralPath (Join-Path $repositoryDirectory ("Addons\"+$addon+"\addon.ini")) -Destination $destination -Force

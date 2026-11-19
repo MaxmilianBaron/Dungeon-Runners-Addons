@@ -1,0 +1,13 @@
+{
+  "name": "dungeon-runners-trade-auction",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "migrate": "wrangler d1 migrations apply DB --local",
+    "test": "node --test test.mjs"
+  },
+  "devDependencies": {
+    "wrangler": "4.137.0"
+  }
+}

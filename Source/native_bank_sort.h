@@ -149,11 +149,11 @@ class NativeBankSort {
         item.position = position;
         return item.id && width && height && quantity;
     }
-    static bool Read(const NativeReader& r,uintptr_t image,Snapshot& result,BankSortFrame& output,bool inventoryMode=false) {
+    static bool Read(const NativeReader& r,uintptr_t image,Snapshot& result,BankSortFrame& output,bool inventoryMode=false,bool requireGeometry=true) {
         if (!r.InWorld()) return false;
         const auto ui = r.Pointer(image+0x5314b0);
         result.bank = r.Pointer(ui+(inventoryMode ? 0x230 : 0x23c));
-        if (!result.bank || !Geometry(r,result.bank,ui,output,inventoryMode) || r.Pointer(ui+0x180)) return false;
+        if (!result.bank || (requireGeometry && !Geometry(r,result.bank,ui,output,inventoryMode)) || r.Pointer(ui+0x180)) return false;
         const auto player = r.Pointer(r.Pointer(ui+0x1b4)+0xf8);
         result.unit = r.Pointer(player+0xb0);
         result.container = r.Pointer(result.bank+(inventoryMode ? 0x188 : 0x180));
@@ -210,10 +210,116 @@ class NativeBankSort {
         for (size_t i = 0; i < order.size(); ++i) { result.objects[i] = objects[order[i]]; result.layout.items[i] = items[order[i]]; }
         BankGrid grid;
         for (const auto& page:result.layout.pages) output.pages.push_back(page.id);
-        return result.selected >= 0 && grid.Build(result.layout);
+        return (!requireGeometry || result.selected >= 0) && grid.Build(result.layout);
     }
 public:
-    explicit NativeBankSort(bool inventory=false):inventoryMode(inventory) {}
+    explicit NativeBankSort(bool inventory=false,uint64_t acknowledgementTimeout=5000):inventoryMode(inventory) { session.AcknowledgementTimeout(acknowledgementTimeout); }
+    static std::string TradeDefinition(const NativeReader& reader,uintptr_t item) { return Definition(reader,item); }
+    static BankSortFrame TradeGeometry(const NativeReader& reader,uintptr_t image,uintptr_t& cachedCurrency) {
+        if (!reader.InWorld()) return {};
+        const auto ui=reader.Pointer(image+0x5314b0);
+        const auto panel=reader.Pointer(ui+0x230);
+        if (!panel || reader.Pointer(ui+0x180)) return {};
+        const auto bounds=[&](uintptr_t node) -> BankSortFrame {
+            BankSortFrame frame;
+            int32_t width=0,height=0;
+            if (reader.String(node+0x10,96)!="Currency" || !reader.Read(node+0xf8,width) || !reader.Read(node+0xfc,height) ||
+                width<48 || width>1024 || height<8 || height>96) return {};
+            const auto background=reader.Pointer(node+0x14);
+            int32_t panelWidth=0,panelHeight=0;
+            if (reader.String(background+0x10,96)!="panel" ||
+                !reader.Read(background+0xf8,panelWidth) || !reader.Read(background+0xfc,panelHeight) ||
+                panelWidth!=395 || panelHeight!=624) return {};
+            bool ownsControl=false;
+            unsigned depth=0;
+            // Gold frame in the NewInventoryAndEquipment background (InGameUI2).
+            frame.x=254;
+            frame.y=594;
+            auto current=background;
+            for (;current && current!=ui;current=reader.Pointer(current+0x14)) {
+                uint32_t flags=0;
+                int32_t x=0,y=0;
+                if (depth++>=32 || !reader.Read(current+0xb4,flags) || !(flags&8) || !reader.Read(current+0xf0,x) ||
+                    !reader.Read(current+0xf4,y) || std::abs(int64_t(x))>16384 || std::abs(int64_t(y))>16384) return {};
+                ownsControl=ownsControl || current==panel;
+                frame.x+=x;
+                frame.y+=y;
+            }
+            if (current!=ui || !ownsControl) return {};
+            frame.width=138;
+            frame.height=27;
+            frame.visible=true;
+            return frame;
+        };
+        if (cachedCurrency) {
+            auto frame=bounds(cachedCurrency);
+            if (frame.visible) return frame;
+            cachedCurrency=0;
+        }
+        std::vector<uintptr_t> nodes{panel};
+        std::set<uintptr_t> seen{panel};
+        for (size_t i=0;i<nodes.size() && nodes.size()<=128;++i) {
+            const auto node=nodes[i];
+            if (reader.String(node+0x10,96)=="Currency") {
+                auto frame=bounds(node);
+                if (frame.visible) cachedCurrency=node;
+                return frame;
+            }
+            for (auto child=reader.Pointer(node+0x18);child;child=reader.Pointer(child+0x20)) {
+                if (nodes.size()>=128 || !seen.insert(child).second || reader.Pointer(child+0x14)!=node) return {};
+                nodes.push_back(child);
+            }
+        }
+        return {};
+    }
+    static uintptr_t TradeContainer(const NativeReader& reader,uintptr_t image,bool inventory,uintptr_t unit) {
+        const auto ui=reader.Pointer(image+0x5314b0);
+        const auto panel=reader.Pointer(ui+(inventory ? 0x230 : 0x23c));
+        uint32_t flags=0;
+        if (!unit || !panel || reader.Pointer(ui+0x180) ||
+            !reader.Read(panel+0xb4,flags) || !(flags&8) ||
+            reader.Pointer(panel+(inventory ? 0x180 : 0x17c))!=unit) return 0;
+        const auto container=reader.Pointer(panel+(inventory ? 0x188 : 0x180));
+        return reader.Pointer(container+0x14)==unit ? container : 0;
+    }
+    static unsigned TradeStorage(const NativeReader& reader,uintptr_t image,bool& held) {
+        const auto unit=reader.LocalAvatar();
+        const auto inventory=TradeContainer(reader,image,true,unit);
+        const auto bank=TradeContainer(reader,image,false,unit);
+        held=(inventory && reader.Pointer(inventory+0x80)) || (bank && reader.Pointer(bank+0x80));
+        return (inventory ? 1u : 0u)|(bank ? 2u : 0u);
+    }
+    static bool TradePage(const NativeReader& reader,uintptr_t image,bool inventory,uintptr_t unit,std::vector<uintptr_t>& objects) {
+        const auto container=TradeContainer(reader,image,inventory,unit);
+        uint16_t level=0;
+        if (!container || !reader.Read(unit+0x314,level)) return false;
+        std::vector<uintptr_t> items;
+        std::set<uintptr_t> pages,seen;
+        bool havePage=false;
+        for (auto page=reader.Pointer(container+0x18);page;page=reader.Pointer(page+0x20)) {
+            if (pages.size()>=64 || !pages.insert(page).second || reader.Pointer(page+0x14)!=container) return false;
+            const auto description=reader.Pointer(page+0x5c);
+            if (!reader.KindOf(description,image+0x530b7c)) continue;
+            uint8_t type=0,required=0;
+            if (!reader.Read(description+0xd7,type) || type!=(inventory ? 1 : 2) ||
+                !reader.Read(description+0xd4,required) || level<required || !Access(image,container,page)) continue;
+            havePage=true;
+            for (auto item=reader.Pointer(page+0x18);item;item=reader.Pointer(item+0x20)) {
+                if (seen.size()>=1024 || !seen.insert(item).second || reader.Pointer(item+0x14)!=page) return false;
+                if (item!=reader.Pointer(container+0x80)) items.push_back(item);
+            }
+        }
+        if (!havePage) return false;
+        objects=std::move(items);
+        return true;
+    }
+    static bool Capture(const NativeReader& reader,uintptr_t image,BankLayout& layout,std::vector<uintptr_t>& objects,uintptr_t& unit) {
+        Snapshot sample;
+        BankSortFrame visible;
+        if(!Read(reader,image,sample,visible) || sample.layout.active) return false;
+        layout=std::move(sample.layout); objects=std::move(sample.objects); unit=sample.unit;
+        return true;
+    }
     static bool Navigation(const NativeReader& r,uintptr_t image,uintptr_t control) {
         const auto ui = r.Pointer(image+0x5314b0), bank = r.Pointer(ui+0x23c);
         const auto unit = r.Pointer(bank+0x17c), container = r.Pointer(bank+0x180);
@@ -238,7 +344,8 @@ public:
     void Reset() { if (session.Busy()) session.Stop("Sorting stopped."); planningCancelled = true; owner = window = 0; nextSample = 0; frame = {}; }
     const BankSortFrame& Frame() const { return frame; }
     void Service(const NativeReader& reader,uintptr_t image,bool enabled,unsigned action,bool focused,uint64_t now,const std::vector<unsigned>& selectedPages={}) {
-        if (action == 3 || !enabled || !focused) { session.Cancel(); planningCancelled = true; }
+        static_cast<void>(focused);
+        if (action == 3 || !enabled) { session.Cancel(); planningCancelled = true; }
         if (session.Busy()) {
             const auto ui = reader.Pointer(image+0x5314b0), bank = reader.Pointer(ui+(inventoryMode ? 0x230 : 0x23c));
             BankSortFrame visible;
@@ -287,7 +394,7 @@ public:
             return;
         }
         frame.available = !sample.layout.active;
-        if (!session.Busy() && enabled && focused && (action == 1 || action == 2)) {
+        if (!session.Busy() && enabled && (action == 1 || action == 2)) {
             owner = sample.unit; window = sample.bank;
             planningSource = sample.layout; planningCancelled = false;
             try { planning = std::async(std::launch::async,[layout=sample.layout,page=sample.selected,all=action==2,pages=selectedPages,inventory=inventoryMode] {
@@ -296,7 +403,7 @@ public:
             catch (...) { planningSource = {}; session.Stop("Bank layout could not be prepared."); }
         }
         if (session.Busy()) {
-            if (const auto* step = session.Next(sample.layout,now,focused || sample.layout.active != 0)) {
+            if (const auto* step = session.Next(sample.layout,now,true)) {
                 const int index = sample.layout.Find(step->item);
                 const auto object = step->take ? (index >= 0 ? sample.objects[index] : 0) : sample.inventories[step->destination.page];
                 session.Sent(object && Send(image,sample.container,object,*step),now);

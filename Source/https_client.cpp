@@ -72,8 +72,7 @@ public:
         int code;do{Check();code=mbedtls_ssl_handshake(&ssl);}while(code==MBEDTLS_ERR_SSL_WANT_READ||code==MBEDTLS_ERR_SSL_WANT_WRITE);
         Require(mbedtls_ssl_get_verify_result(&ssl)==0,"HTTPS certificate verification failed");Require(code==0,"TLS connection failed");
     }
-    std::string Request(const std::string& host,const std::string& path) {
-        const std::string request="GET "+path+" HTTP/1.1\r\nHost: "+host+"\r\nUser-Agent: Dungeon-Runners-Addons/Leaderboard\r\nAccept: application/json\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n";
+    std::string Request(const std::string& request) {
         size_t position=0;while(position<request.size()){Check();int n=mbedtls_ssl_write(&ssl,reinterpret_cast<const unsigned char*>(request.data()+position),request.size()-position);Require(n>0,"HTTPS send failed");position+=n;}
         std::string response;unsigned char buffer[8192];
         for(;;){Check();int n=mbedtls_ssl_read(&ssl,buffer,sizeof(buffer));if(n==0||n==MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY)break;Require(n>0,"HTTPS response was interrupted");Require(response.size()+n<=BodyLimit*4+HeaderLimit,"HTTPS response is too large");response.append(reinterpret_cast<const char*>(buffer),n);}return response;
@@ -101,6 +100,31 @@ Response Parse(const std::string& response) {
 }
 Response Get(const std::string& host,const std::string& path,const std::atomic<bool>& cancelled) {
     Require(!host.empty()&&host.size()<254&&host.find_first_not_of("abcdefghijklmnopqrstuvwxyz0123456789.-")==std::string::npos&&!path.empty()&&path.front()=='/'&&path.size()<1024&&path.find_first_of("\r\n\\ ")==std::string::npos&&path.find('\0')==std::string::npos,"Invalid HTTPS endpoint");
-    Connection connection(cancelled);connection.Open(host);return Parse(connection.Request(host,path));
+    Connection connection(cancelled);connection.Open(host);
+    return Parse(connection.Request("GET "+path+" HTTP/1.1\r\nHost: "+host+"\r\nUser-Agent: Dungeon-Runners-Addons/Leaderboard\r\nAccept: application/json\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n"));
+}
+bool TradeHost(const std::string& host) {
+    if (host==TradeServiceHost) return true;
+    constexpr char suffix[]=".workers.dev";
+    constexpr size_t length=sizeof(suffix)-1;
+    if (host.size()<=length || host.size()>160 || host.compare(host.size()-length,length,suffix) ||
+        host.find_first_not_of("abcdefghijklmnopqrstuvwxyz0123456789.-")!=std::string::npos) return false;
+    const size_t end=host.size()-length, dot=host.find('.');
+    return dot>0 && dot<=63 && dot+1<end && end-dot-1<=63 && host.find('.',dot+1)==end && host.front()!='-' &&
+        host[dot-1]!='-' && host[dot+1]!='-' && host[end-1]!='-';
+}
+Response Trade(const std::string& host,const std::string& path,const std::string& method,
+    const std::string& body,const std::string& token,const std::atomic<bool>& cancelled) {
+    const size_t pathLimit=path.compare(0,16,"/v1/tracked?ids=")==0 ? 412 : 128;
+    Require(TradeHost(host) && path.compare(0,4,"/v1/")==0 && path.size()<=pathLimit &&
+        path.find_first_not_of("/abcdefghijklmnopqrstuvwxyz0123456789.?=&") == std::string::npos,"Invalid Trade Auction endpoint");
+    Require((method=="GET" || method=="POST" || method=="PUT") && body.size()<=12288 &&
+        (method=="PUT" || body.empty()) && (token.empty() || (token.size()==64 &&
+        token.find_first_not_of("0123456789abcdef")==std::string::npos)),"Invalid Trade Auction request");
+    std::string request=method+" "+path+" HTTP/1.1\r\nHost: "+host+"\r\nUser-Agent: Dungeon-Runners-Addons/Trade-Auction\r\nAccept: application/json\r\nAccept-Encoding: identity\r\nConnection: close\r\n";
+    if (!token.empty()) request+="Authorization: Bearer "+token+"\r\n";
+    if (method!="GET") request+="Content-Type: application/json\r\nContent-Length: "+std::to_string(body.size())+"\r\n";
+    Connection connection(cancelled); connection.Open(host);
+    return Parse(connection.Request(request+"\r\n"+body));
 }
 }

@@ -35,12 +35,19 @@
 #include "loadouts_store.h"
 #include "loadout_name.h"
 #include "leaderboard_client.h"
+#include "trade_auction_client.h"
+#include "AardvarkUI/layout.h"
+#include "trade_auction_catalog.h"
+#include "trade_auction_icons.h"
+#include "trade_auction_layout.h"
+#include "sally_sam.h"
 #include "controller.h"
 #include "controller_discovery.h"
 
 extern "C" void __cdecl MeterControllerRelease();
 extern "C" void __cdecl MeterMouseLookRelease();
 extern "C" void __cdecl MeterMouseLookButton(bool,bool);
+extern "C" void __cdecl MeterNativeTradeClearHover();
 static Controller::Settings controllerOptions,draftControllerOptions;
 static Controller::Status controllerStatus;
 static std::filesystem::path controllerSettings;
@@ -90,6 +97,53 @@ static size_t leaderboardPage=0;
 static RECT leaderboardArea{}, leaderboardButtonRect{}, leaderboardCloseRect{}, leaderboardRefreshRect{}, leaderboardPreviousRect{}, leaderboardNextRect{};
 static std::array<RECT,2> leaderboardPeriodRects{};
 static std::array<RECT,static_cast<size_t>(Leaderboard::Category::Count)> leaderboardTabRects{};
+enum class TradeScreen { Browse, Picker, Details, Editor, Catalog, Variant, RollChoices, Watches, WatchDetails };
+enum class TradeCatalogPage { Groups, Types, Items };
+static TradeScreen tradeScreen=TradeScreen::Browse;
+static std::unique_ptr<TradeAuction::Client> tradeClient;
+static TradeAuction::Icons tradeIcons;
+static TradeAuction::Page tradePage;
+static TradeAuction::Offer tradeDraft;
+static TradeAuction::Item tradeWantedSample;
+static TradeAuction::LocalWatchList tradeWatchList;
+static TradeAuction::LocalWatch tradeWatchSelection;
+static std::string tradeWatchStatus;
+static size_t tradeWatchPage=0;
+static bool tradeWatchAvailable=false;
+static TradeAuction::Capture tradeRequest,tradeOfferSource;
+static std::vector<TradeAuction::Choice> tradeChoices;
+static BankSortFrame tradeGeometry;
+static LoadoutNameInput tradeSearch;
+static TradeCatalogPage tradeCatalogPage=TradeCatalogPage::Groups;
+static TradeAuction::CatalogGroup tradeCatalogGroup=TradeAuction::CatalogGroup::All;
+static TradeAuction::CatalogType tradeCatalogType=TradeAuction::CatalogType::All;
+static std::vector<TradeAuction::CatalogItem> tradeCatalog;
+static std::vector<const TradeRollRecipe*> tradeRecipes;
+static std::array<unsigned,6> tradeRolls{};
+static size_t tradeRecipeIndex=0,tradeRollSlot=0,tradeRollPage=0;
+static TradeScreen tradeCatalogBack=TradeScreen::Editor;
+static bool tradeShowingWanted=false;
+static std::string tradeSearchFilter;
+static std::string tradeBefore,tradeStatus,tradeReplyItem;
+static uint64_t tradeLastSync=0;
+static uint32_t tradeCharacterId=0;
+static size_t tradeChoicePage=0,tradeStatOffset=0;
+static size_t tradeMarketPage=0,tradeMarketTarget=0;
+static bool tradeOpen=false,tradeTyping=false,tradeMine=false,tradeRefresh=false,tradeCapturing=false;
+static bool tradeEnabled=true,sallySamEnabled=true;
+static SallySam::Frame sallySamFrame;
+static RECT tradeArea{},tradeEntrance{},tradeSearchArea{},tradeScrollArea{};
+static RECT tradeTitleArea{},tradeResizeArea{};
+static TradeAuction::WindowLayout tradeWindowLayout;
+static std::filesystem::path tradeWindowSettings;
+static bool tradeWindowDirty=false;
+static unsigned tradeStorage=0,tradeScannedStorage=0;
+static bool tradeHoldingItem=false,tradeHoverBlocked=false,nativeLeftDown=false;
+static bool TradeMouseArea(POINT);
+static bool TradeKeyboard(UINT,WPARAM);
+static bool TradeWindowInput(HWND,UINT,WPARAM,LPARAM,LPARAM);
+static void EndTradeWindowDrag();
+static void CloseTrade();
 static bool goldHidden = true, draftGoldHidden = true;
 static bool cooldownsEnabled = true, draftCooldownsEnabled = true;
 static bool cooldownTenths = true, draftCooldownTenths = true;
@@ -251,6 +305,8 @@ static HotkeyInput hotkeyInput;
 static std::string hotkeyMessage;
 static UiFont* valueFont = nullptr;
 static std::unique_ptr<UiFont> meterFont;
+static std::unique_ptr<UiFont> tradeFont;
+static int tradeFontEm=0;
 static ULONGLONG lastUpdate = 0;
 static std::string settingsFile;
 static NativeSkin nativeSkin;
@@ -451,14 +507,28 @@ struct Lock {
 
 static bool MouseInside(LPARAM value) {
     POINT point{GET_X_LPARAM(value), GET_Y_LPARAM(value)};
+    if (PtInRect(&tradeArea,point) || PtInRect(&tradeEntrance,point)) return TradeMouseArea(point);
     for (unsigned i = 0; i < hitCount; ++i) if (PtInRect(&hitRects[i], point)) return true;
     return false;
+}
+
+static LPARAM OverlayMousePosition(HWND window,UINT message,LPARAM value) {
+    POINT point{GET_X_LPARAM(value),GET_Y_LPARAM(value)};
+    if (message==WM_MOUSEWHEEL || message==WindowsCompat::MouseHorizontalWheel) ScreenToClient(window,&point);
+    RECT client{};
+    const auto display=Ui::GetIO().DisplaySize;
+    if (GetClientRect(window,&client) && client.right>0 && client.bottom>0 && display.x>0 && display.y>0) {
+        const auto projected=ProjectUiPoint({float(point.x),float(point.y)},{float(client.right),float(client.bottom)},display);
+        point={std::lround(projected.x),std::lround(projected.y)};
+    }
+    return MAKELPARAM(std::clamp<LONG>(point.x,-32768,32767),std::clamp<LONG>(point.y,-32768,32767));
 }
 
 static bool InputAllowed(UiPoint point,bool menuLayer) {
     if (moveEditing) return true;
     const auto display = Ui::GetIO().DisplaySize;
     const POINT pointer{static_cast<LONG>(point.x),static_cast<LONG>(point.y)};
+    if (TradeMouseArea(pointer)) return true;
     if (loadoutInputTest && loadoutFrame.visible && (LoadoutContains(pointer) || PtInRect(&inventoryArea,pointer)) && display.x>0 && display.y>0) return loadoutInputTest(point.x/display.x,point.y/display.y,false);
     if (bankInputTest && bankFrame.visible && (PtInRect(&bankArea,pointer) || PtInRect(&bankPickerArea,pointer)) && display.x > 0 && display.y > 0) return bankInputTest(point.x/display.x,point.y/display.y,false);
     if (!nativeInputTest) return true;
@@ -469,10 +539,12 @@ static LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wparam
     ControllerDeviceNotifications::Observe(message,wparam);
     if (message==WM_KILLFOCUS || message==WM_NCDESTROY || (message==WM_ACTIVATEAPP && !wparam) || (message==WM_SIZE && wparam==SIZE_MINIMIZED)) { MeterControllerRelease(); MeterMouseLookRelease(); }
     WNDPROC original;
-    bool consume = false, nativeBankClose = false;
+    bool consume=false,nativeBankClose=false,clearNativeHover=false,releaseNativeLeft=false;
     {
         Lock lock;
         original = previousProcedure;
+        const bool mouse=message>=WM_MOUSEFIRST && message<=WindowsCompat::MouseHorizontalWheel;
+        LPARAM position=lparam;
         if (shutdownMessage && message == shutdownMessage) {
             ShutdownUnlocked();
             InterlockedExchange(&stopped, 1);
@@ -480,7 +552,17 @@ static LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wparam
         }
         if (context && !shuttingDown) {
             Ui::SetCurrentContext(context);
-            if (LoadoutInput(window,message,wparam,lparam)) {
+            if (mouse) position=OverlayMousePosition(window,message,lparam);
+            const POINT pointer{GET_X_LPARAM(position),GET_Y_LPARAM(position)};
+            const bool tradePointer=mouse && (PtInRect(&tradeArea,pointer) || PtInRect(&tradeEntrance,pointer));
+            if (message==WM_KILLFOCUS || message==WM_CANCELMODE) nativeLeftDown=false;
+            if (message==WM_KILLFOCUS || message==WM_CANCELMODE || message==WM_MOUSELEAVE) tradeHoverBlocked=false;
+            if (TradeWindowInput(window,message,wparam,lparam,position)) return message==WM_SETCURSOR ? TRUE : 0;
+            if ((message==WM_LBUTTONDOWN || message==WM_LBUTTONDBLCLK) && !PtInRect(&tradeSearchArea,pointer)) tradeTyping=false;
+            if (TradeKeyboard(message,wparam)) return 0;
+            if (!(mouse && (tradePointer || (tradeOpen && tradeHoldingItem))) &&
+                LoadoutInput(window,message,wparam,position)) {
+                if (message==WM_LBUTTONUP) nativeLeftDown=false;
                 if (message == WM_RBUTTONDOWN || message == WM_RBUTTONDBLCLK) MeterMouseLookButton(true,true);
                 else if (message == WM_RBUTTONUP) MeterMouseLookButton(false,true);
                 return 0;
@@ -507,12 +589,12 @@ static LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wparam
                 if ((message == WM_KEYDOWN || message == WM_KEYUP) && wparam == VK_ESCAPE) { (inventory ? inventoryAction : bankAction) = 3; consumeEscapeUp = false; nativeBankClose = true; }
                 else if (message == WM_KEYDOWN || message == WM_KEYUP || message == WM_CHAR) consume = true;
                 else if (message >= WM_MOUSEFIRST && message <= WindowsCompat::MouseHorizontalWheel) {
-                    POINT point{GET_X_LPARAM(lparam),GET_Y_LPARAM(lparam)};
+                    POINT point{GET_X_LPARAM(position),GET_Y_LPARAM(position)};
                     const auto display = Ui::GetIO().DisplaySize;
                     const bool closeMouse = message == WM_MOUSEMOVE || message == WM_LBUTTONDOWN || message == WM_LBUTTONUP;
                     const auto navigation=inventory ? loadoutInputTest : bankInputTest;
                     nativeBankClose = closeMouse && navigation && display.x > 0 && display.y > 0 && navigation(point.x/display.x,point.y/display.y,true);
-                    if (!nativeBankClose) { if (message == WM_MOUSEMOVE || PtInRect(inventory ? &inventoryArea : &bankArea,point)) Ui::Message(window,message,wparam,lparam); consume = true; }
+                    if (!nativeBankClose) { if (message == WM_MOUSEMOVE || PtInRect(inventory ? &inventoryArea : &bankArea,point)) Ui::Message(window,message,wparam,position); consume = true; }
                 }
                 if (nativeBankClose) { Ui::ClearInput(); dragging = false; }
                 if (message == WM_KILLFOCUS) (inventory ? inventoryAction : bankAction) = 3;
@@ -521,9 +603,10 @@ static LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wparam
         }
         if (context && !shuttingDown && worldVisible && !consume && !nativeBankClose) {
             Ui::SetCurrentContext(context);
-            if (message == WM_KEYDOWN && wparam == VK_ESCAPE && (leaderboardOpen || panelOptionsOpen || addonsOpen || reportOpen || historyOpen || (visible && selectedCharacter) || consumeEscapeUp)) {
+            if (message == WM_KEYDOWN && wparam == VK_ESCAPE && (tradeOpen || leaderboardOpen || panelOptionsOpen || addonsOpen || reportOpen || historyOpen || (visible && selectedCharacter) || consumeEscapeUp)) {
                 if (!(lparam & (1LL << 30)) && !consumeEscapeUp) {
-                    if (leaderboardOpen) { leaderboardOpen=false; Ui::ClearInput(); }
+                    if (tradeOpen) { CloseTrade(); Ui::ClearInput(); }
+                    else if (leaderboardOpen) { leaderboardOpen=false; Ui::ClearInput(); }
                     else if (reportOpen) reportOpen = false;
                     else if (addonsOpen) BackFromAddons();
                     else if (selectedCharacter && (visible || historyOpen)) BackFromDetails();
@@ -538,14 +621,7 @@ static LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wparam
             } else {
                 const bool down = message == WM_LBUTTONDOWN || message == WM_RBUTTONDOWN || message == WM_MBUTTONDOWN || message == WM_XBUTTONDOWN || message == WM_LBUTTONDBLCLK;
                 const bool up = message == WM_LBUTTONUP || message == WM_RBUTTONUP || message == WM_MBUTTONUP || message == WM_XBUTTONUP;
-                LPARAM position = lparam;
-                if (message == WM_MOUSEWHEEL || message == WindowsCompat::MouseHorizontalWheel) {
-                    POINT point{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
-                    ScreenToClient(window, &point);
-                    position = MAKELPARAM(point.x, point.y);
-                }
                 const POINT pointer{GET_X_LPARAM(position),GET_Y_LPARAM(position)};
-                const bool mouse = message >= WM_MOUSEFIRST && message <= WindowsCompat::MouseHorizontalWheel;
                 const bool allowed = !mouse || InputAllowed({static_cast<float>(pointer.x),static_cast<float>(pointer.y)},addonsOpen || leaderboardOpen || PtInRect(&addonsButtonRect,pointer) || PtInRect(&leaderboardButtonRect,pointer));
                 if (!allowed) { Ui::ClearInput(); dragging = false; EndPanelResize(); }
                 const bool dismissOptions = allowed && down && panelOptionsOpen && !PtInRect(&panelArea,pointer);
@@ -553,15 +629,35 @@ static LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wparam
                 const bool inside = allowed && MouseInside(position);
                 if (down && inside) dragging = true;
                 consume = mouse && allowed && (moveEditing || reportOpen || inside || dragging);
+                const bool overTrade=PtInRect(&tradeArea,pointer) || PtInRect(&tradeEntrance,pointer);
+                if (mouse && !moveEditing) {
+                    const bool blocked=overTrade && !tradeHoldingItem;
+                    clearNativeHover=blocked && !tradeHoverBlocked;
+                    releaseNativeLeft=blocked && message==WM_LBUTTONUP && nativeLeftDown;
+                    tradeHoverBlocked=blocked;
+                    if (tradeHoldingItem && (tradeOpen || overTrade)) consume=false;
+                }
+                if (message==WM_LBUTTONDOWN || message==WM_LBUTTONDBLCLK) nativeLeftDown=!consume;
+                else if (message==WM_LBUTTONUP) nativeLeftDown=false;
                 if (moveEditing && (message == WM_KEYDOWN || message == WM_KEYUP || message == WM_CHAR)) consume = true;
                 if (consume && (down || up))
                     Ui::GetIO().AddMousePosEvent(static_cast<float>(GET_X_LPARAM(position)), static_cast<float>(GET_Y_LPARAM(position)));
-                if (!dismissOptions && (consume || message == WM_MOUSEMOVE || message == WM_MOUSELEAVE || message == WM_KILLFOCUS || message == WM_SETFOCUS))
-                    Ui::Message(window, message, wparam, lparam);
+                const bool tradeWheel=overTrade && !tradeHoldingItem && message==WM_MOUSEWHEEL && !PtInRect(&tradeScrollArea,pointer);
+                if (!dismissOptions && !tradeWheel && (consume || message == WM_MOUSEMOVE || message == WM_MOUSELEAVE || message == WM_KILLFOCUS || message == WM_SETFOCUS))
+                    Ui::Message(window, message, wparam, position);
                 if (up) dragging = false;
                 if (message == WM_KILLFOCUS || message == WM_CAPTURECHANGED) { dragging = false; moveSelected = -1; EndPanelResize(); }
                 if (message == WM_KILLFOCUS) panelOptionsOpen = false;
             }
+        }
+    }
+    if (consume && clearNativeHover) MeterNativeTradeClearHover();
+    if (consume && releaseNativeLeft && original) {
+        RECT client{};
+        if (GetClientRect(window,&client) && client.right>0 && client.bottom>0 &&
+            client.right<32767 && client.bottom<32767) {
+            const auto outside=MAKELPARAM(client.right,client.bottom);
+            CallWindowProcW(original,window,WM_LBUTTONUP,0,outside);
         }
     }
     if (message == WM_RBUTTONDOWN || message == WM_RBUTTONDBLCLK) MeterMouseLookButton(true,consume);
@@ -577,13 +673,17 @@ static void ShutdownUnlocked() {
     healthVignette.Reset();
     std::vector<MeterDetailRow>().swap(detailRows); std::vector<float>().swap(detailOffsets); cachedDetailRevision = UINT64_MAX;
     EndPanelResize();
+    EndTradeWindowDrag();
     hotkeyInput.Reset();
     if (!context) return;
     Ui::SetCurrentContext(context);
     if (gameWindow && previousProcedure && reinterpret_cast<WNDPROC>(GetWindowLongPtrW(gameWindow, GWLP_WNDPROC)) == WindowProcedure)
         SetWindowLongPtrW(gameWindow, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(previousProcedure));
     nativeSkin.Release();
+    tradeIcons.Reset();
     meterFont.reset();
+    tradeFont.reset();
+    tradeFontEm=0;
     skinAttempted = false;
     Ui::DestroyContext(context);
     context = nullptr;
@@ -697,16 +797,21 @@ static void RightMeterText(UiDrawList* draw,const char* text,UiPoint right,UiPoi
     MeterText(draw,text,UiPoint(right.x-MeterTextSize(text,scale).x,right.y),scale,color);
 }
 
-static std::string MeterName(const char* text,UiPoint scale,float width) {
+static std::string FitTextLine(UiFont& font,float size,const char* text,float width) {
+    auto fits=[&](const char* value) { return font.CalcTextSizeA(size,FLT_MAX,0,value).x<=width; };
     std::string name(text);
-    if (MeterTextSize(text,scale).x<=width) return name;
+    if (fits(text)) return name;
     while (!name.empty()) {
         size_t end=name.size()-1;
         while (end && (static_cast<unsigned char>(name[end])&0xc0)==0x80) --end;
         name.resize(end);
-        if (MeterTextSize((name+"...").c_str(),scale).x<=width) break;
+        if (fits((name+"...").c_str())) break;
     }
     return name+"...";
+}
+
+static std::string MeterName(const char* text,UiPoint scale,float width) {
+    return FitTextLine(*meterFont,14*scale.y,text,width);
 }
 
 static void Heading(UiDrawList* draw, const char* text, UiPoint position, UiPoint scale, float width, float factor = 1) {
@@ -934,7 +1039,7 @@ static void DrawDetails(const MeterView& view,const char* period=nullptr) {
     const bool showView = !detailSkill && (detailByActor || (!direction && detailActorName.empty()));
     const bool showBack = !showView || historyOpen;
     detailBackRect = detailViewRect = {};
-    if (Ui::Begin("Damage details", nullptr, SurfaceFlags | ((addonsOpen || reportOpen) ? Ui::NoInputs : 0))) {
+    if (Ui::Begin("Damage details", nullptr, SurfaceFlags | Ui::KeepInView | ((addonsOpen || reportOpen) ? Ui::NoInputs : 0))) {
         const UiPoint origin = MoveSurface(size, scale, showBack && showView ? 350.0f : 450.0f);
         detailsArea = Rectangle(origin, size);
         auto point = [origin,scale](float x, float y) { return At(origin,scale,x,y); };
@@ -1146,7 +1251,7 @@ static void DrawWellTimer() {
     const bool blocked = addonsOpen || reportOpen || historyOpen || (visible && selectedCharacter);
     Ui::SetNextWindowPos(UiPoint(16*scale.x,display.y*.55f),Ui::FirstUse);
     Ui::SetNextWindowSize(size);
-    if (Ui::Begin("##WishingWellTimer",nullptr,SurfaceFlags | (blocked ? Ui::NoInputs : 0))) {
+    if (Ui::Begin("##WishingWellTimer",nullptr,SurfaceFlags | Ui::KeepInView | (blocked ? Ui::NoInputs : 0))) {
         const auto origin = MoveSurface(size,scale,116,36,UiPoint(0,0));
         auto* draw = Ui::GetWindowDrawList();
         nativeSkin.Row(draw,origin,size,scale,0,false);
@@ -1236,7 +1341,7 @@ static void DrawPanel() {
     if (panelPositionPending) { Ui::SetNextWindowPos(panelNextPosition); panelPositionPending=false; }
     else Ui::SetNextWindowPos(UiPoint(display.x-16*scale.x,display.y-155*scale.y),Ui::FirstUse,UiPoint(1,1));
     Ui::SetNextWindowSize(size);
-    if (Ui::Begin(packet.flags & 1 ? "Damage meter [DEMO]" : "Damage meter",nullptr,SurfaceFlags | ((addonsOpen || reportOpen) ? Ui::NoInputs : 0))) {
+    if (Ui::Begin(packet.flags & 1 ? "Damage meter [DEMO]" : "Damage meter",nullptr,SurfaceFlags | Ui::KeepInView | ((addonsOpen || reportOpen) ? Ui::NoInputs : 0))) {
         const UiPoint origin = MoveSurface(size,scale,width-30,18);
         panelArea = Rectangle(origin,size);
         UiDrawList* draw = Ui::GetWindowDrawList();
@@ -2340,7 +2445,7 @@ static void DiscoverAddons(const std::filesystem::path& root) {
     if (addonRegistry.MoveEverything()) registeredAddons.push_back({"moveeverything","Moveeverything","Move player, party, target, chat, minimap and buff/curse panels.",OpenMoveSettings,DrawMoveSettings,nullptr});
     if (addonRegistry.Loadouts()) registeredAddons.push_back({"loadouts","Loadouts & Sorting","Gear and hotbar loadouts, Inventory and selected bank page sorting.",OpenLoadoutSettings,DrawLoadoutSettings,nullptr});
     if (addonRegistry.ControllerEnabled()) registeredAddons.push_back({"controller","Controller","Gamepad movement, combat, consumables and menus.",OpenControllerSettings,DrawControllerSettings,nullptr});
-    if (addonRegistry.Enhanced()) registeredAddons.push_back({"enhanced-settings","Enhanced Settings","Camera zoom, mouse look, left-click attacks, low HP warning and chat timestamps.",OpenEnhancedSettings,DrawEnhancedSettings,nullptr});
+    if (addonRegistry.Enhanced() || addonRegistry.TradeAuction() || !addonRegistry.EnhancedToggles().empty()) registeredAddons.push_back({"enhanced-settings","Enhanced Settings","Camera, combat, chat and addon options.",OpenEnhancedSettings,DrawEnhancedSettings,nullptr});
     for (const auto& extension:addonRegistry.Extensions()) registeredAddons.push_back({extension.id,extension.name,extension.description,OpenExtensionSettings,DrawExtensionSettings,&extension,addonRegistry.Settings(extension)});
 }
 
@@ -2391,9 +2496,10 @@ static void DrawLibrary(UiPoint origin,UiPoint scale,float listHeight) {
 }
 
 #include "leaderboard_ui.h"
+#include "trade_auction_ui.h"
 
 static void DrawAddons() {
-    if (moveEditing) return;
+    if (moveEditing || tradeOpen) return;
     const UiPoint display = Ui::GetIO().DisplaySize;
     if (menuBounds[2]<=0 || menuBounds[3]<=0 || !nativeSkin.Ready()) return;
     const UiPoint position(menuBounds[0]*display.x,menuBounds[1]*display.y);
@@ -2421,7 +2527,7 @@ static void DrawAddons() {
     }
     if (addonsOpen) {
         const float listHeight = std::clamp(static_cast<float>(registeredAddons.size())*48,48.0f,192.0f);
-        const float height = activeAddon ? (activeAddon->advanced || activeAddon->open == OpenControllerSettings ? 506.0f : activeAddon->open == OpenWellSettings ? 518.0f : activeAddon->open == OpenEnhancedSettings ? 533.0f : activeAddon->open == OpenDamageSettings ? 390.0f : activeAddon->open == OpenNameplateSettings && !nameplatePage ? 340.0f : activeAddon->open == OpenMythicSettings ? 403.0f : activeAddon->open == OpenLoadoutSettings ? 342.0f : activeAddon->open == OpenCursorSettings ? 347.0f : 289.0f) : 125+listHeight;
+        const float height = activeAddon ? (activeAddon->advanced || activeAddon->open == OpenControllerSettings ? 506.0f : activeAddon->open == OpenWellSettings ? 518.0f : activeAddon->open == OpenEnhancedSettings ? 533.0f+EnhancedExtraHeight() : activeAddon->open == OpenDamageSettings ? 390.0f : activeAddon->open == OpenNameplateSettings && !nameplatePage ? 340.0f : activeAddon->open == OpenMythicSettings ? 403.0f : activeAddon->open == OpenLoadoutSettings ? 342.0f : activeAddon->open == OpenCursorSettings ? 347.0f : 289.0f) : 125+listHeight;
         const bool controllerPanel=activeAddon && activeAddon->open==OpenControllerSettings;
         const auto preferred=controllerPanel ? UiPoint(std::max(buttonScale.x,1.5f),std::max(buttonScale.y,1.5f)) : buttonScale;
         const UiPoint scale = FitScale(preferred,UiPoint(350,height));
@@ -2450,6 +2556,24 @@ extern "C" __declspec(dllexport) int __cdecl MeterOverlayStart(const char* iniFi
     const auto addonsDirectory=std::filesystem::u8path(settingsFile).parent_path().parent_path();
     if (!LoadSkinData(addonsDirectory/L"Runtime"/L"ui.bin")) return 0;
     DiscoverAddons(addonsDirectory);
+    const auto tradeDirectory=addonsDirectory/L"TradeAuction";
+    tradeClient=addonRegistry.TradeAuction() ? std::make_unique<TradeAuction::Client>(TradeAuction::ServiceHost,tradeDirectory) : nullptr;
+    tradeWatchList.Open(tradeClient ? tradeDirectory : std::filesystem::path{});
+    tradeWindowLayout={};
+    tradeWindowDirty=false;
+    tradeWindowSettings=tradeClient ? tradeDirectory/L"window.ini" : std::filesystem::path{};
+    if (!tradeWindowSettings.empty()) {
+        std::ifstream saved(tradeWindowSettings);
+        int version=0;
+        float x=0,y=0,scale=0;
+        if (saved>>version>>x>>y>>scale && version==1 &&
+            x>=0 && x<=1 && y>=0 && y<=1 &&
+            scale>=TradeAuction::WindowLayout::MinScale && scale<=TradeAuction::WindowLayout::MaxScale) {
+            tradeWindowLayout.anchor.fraction={x,y};
+            tradeWindowLayout.preferredScale=scale;
+        }
+    }
+    tradeIcons.Configure(addonsDirectory.parent_path()/L"game.pkg");
     enhancedSettings = addonsDirectory / L"EnhancedSettings" / L"settings.ini";
     const auto enhanced = EnhancedSettings::Read(addonsDirectory);
     lowHpOptions = enhanced.health; healthFrame = {}; lowHpPreviewUntil = 0;
@@ -2457,6 +2581,8 @@ extern "C" __declspec(dllexport) int __cdecl MeterOverlayStart(const char* iniFi
     mouseLookEnabled = enhanced.mouseLook; mouseLookAvailable = false;
     enhancedZoomEnabled = enhanced.enhancedZoom; enhancedZoomAvailable = false;
     chatTimestampsEnabled = enhanced.chatTimestamps; chatTimestampsAvailable = false;
+    tradeEnabled = enhanced.tradeAuction;
+    sallySamEnabled = enhanced.sallySam;
     controllerSettings=addonsDirectory/L"Controller"/L"settings.ini";
     controllerOptions={}; controllerStatus={};
     { std::ifstream input(controllerSettings); controllerOptions.Load(input); }
@@ -2635,6 +2761,7 @@ extern "C" void __cdecl MeterOverlayLayer(IDirect3DDevice9* device,AddonUiLayer 
         nativeFrame = true;
         nativeLayers = 0;
         hitCount = 0;
+        tradeEntrance={};
     }
     const unsigned bit = 1u << static_cast<unsigned>(layer);
     if (nativeLayers & bit) return;
@@ -2650,25 +2777,112 @@ extern "C" void __cdecl MeterOverlayLayer(IDirect3DDevice9* device,AddonUiLayer 
         DrawHistory();
         DrawReport();
         DrawHelp();
-    } else if (layer == AddonUiLayer::Menu) { help.text.clear(); DrawAddons(); DrawLeaderboard(); DrawHelp(); }
+    } else if (layer == AddonUiLayer::Menu) {
+        help.text.clear();
+        DrawAddons(); DrawLeaderboard();
+        DrawHelp();
+    }
     else if (layer == AddonUiLayer::CharacterSheet) DrawCharacterSheet();
-    else if (layer == AddonUiLayer::Bank) { help.text.clear(); DrawBankSort(); DrawBankSortingStatus(); DrawBankPagePicker(); DrawHelp(); }
+    else if (layer == AddonUiLayer::Bank) {
+        help.text.clear(); DrawBankSort(); DrawBankSortingStatus(); DrawBankPagePicker();
+        DrawHelp();
+    }
     else if (layer == AddonUiLayer::Inventory) {
-        if (loadoutFrame.visible && addonRegistry.Loadouts()) { help.text.clear(); DrawLoadouts(); DrawHelp(); }
+        help.text.clear();
+        if (loadoutFrame.visible && addonRegistry.Loadouts()) DrawLoadouts();
         else loadoutArea=loadoutListButton=loadoutSortButton=loadoutNameArea=inventoryArea={};
+        DrawTradeEntrance();
+        if (tradeOpen) DrawTradeWindow(now);
+        DrawHelp();
     }
     else DrawCooldowns(now,layer);
     Ui::Flush();
     Ui::SetInputEnabled(true);
 }
 
+bool MeterOverlaySallySamEnabled() {
+    Lock lock;
+    return addonRegistry.SallySam() && sallySamEnabled && !shuttingDown;
+}
+
+void MeterOverlaySallySam(const SallySam::Frame& frame) {
+    Lock lock;
+    sallySamFrame=frame;
+}
+
+static void DrawSallySamMap() {
+    const auto& map=sallySamFrame.map;
+    const auto display=Ui::GetIO().DisplaySize;
+    if (!valueFont || map.screen.x<=0 || map.screen.y<=0 || display.x<=0 || display.y<=0) return;
+    const float sx=display.x/map.screen.x,sy=display.y/map.screen.y;
+    const auto position=[&](float x,float y) { return UiPoint{x*sx,y*sy}; };
+    const auto left=position(map.rect.left,map.rect.top),right=position(map.rect.right,map.rect.bottom);
+    const float width=right.x-left.x,height=right.y-left.y;
+    const float unit=std::clamp(GameScale().y,.65f,2.5f);
+    const float size=valueFont->SizeForEm(14*unit);
+    auto* draw=Ui::GetForegroundDrawList();
+    const auto text=[&](const std::string& label,UiPoint at,float fontSize,UiColor color) {
+        const auto extent=valueFont->CalcTextSizeA(fontSize,FLT_MAX,0,label.c_str());
+        draw->AddRectFilled({at.x-3*unit,at.y-unit},{at.x+extent.x+3*unit,at.y+extent.y+unit},UI_COLOR(18,13,8,220));
+        draw->AddText(valueFont,fontSize,at,color,label.c_str());
+    };
+    static constexpr UiColor colors[]={UI_COLOR(226,203,156,255),UI_COLOR(255,211,96,255),UI_COLOR(116,220,233,255),
+        UI_COLOR(222,161,255,255),UI_COLOR(155,181,246,255),UI_COLOR(247,158,231,255)};
+    if (map.mode==2) {
+        std::array<bool,std::size(SallySam::Names)> seen{};
+        std::string caption;
+        for (const auto& vendor:sallySamFrame.vendors) {
+            const auto index=static_cast<unsigned>(vendor.kind);
+            if (seen[index]) continue;
+            seen[index]=true;
+            if (!caption.empty()) caption+='\n';
+            caption+=SallySam::Names[index];
+        }
+        const auto natural=valueFont->CalcTextSizeA(size,FLT_MAX,0,caption.c_str());
+        const float fontSize=size*std::min(1.f,(width-8*unit)/std::max(1.f,natural.x));
+        if (fontSize>0) {
+            const auto extent=valueFont->CalcTextSizeA(fontSize,FLT_MAX,0,caption.c_str());
+            text(caption,{left.x+(width-extent.x)*.5f,std::min(right.y+4*unit,display.y-extent.y-2*unit)},fontSize,GoldColor);
+        }
+    }
+    draw->PushClipRect(left,right);
+    for (const auto& vendor:sallySamFrame.vendors) {
+        bool edge=false;
+        const auto projected=SallySam::Project(map,vendor.position,13*unit/std::min(sx,sy),edge);
+        const auto at=position(projected.x,projected.y);
+        const auto color=colors[static_cast<unsigned>(vendor.kind)];
+        const float marker=(edge ? 4.f : 3.f)*unit;
+        draw->AddRectFilled({at.x-marker-unit,at.y-marker-unit},{at.x+marker+unit,at.y+marker+unit},UI_COLOR(0,0,0,255));
+        draw->AddRectFilled({at.x-marker,at.y-marker},{at.x+marker,at.y+marker},color);
+        auto label=SallySam::Label(vendor);
+        if (edge) label+=" >";
+        const auto extent=valueFont->CalcTextSizeA(size,FLT_MAX,0,label.c_str());
+        if (extent.x+8*unit>=width || extent.y+6*unit>=height) continue;
+        float x=std::clamp(at.x+8*unit,left.x+4*unit,right.x-extent.x-4*unit);
+        float y=std::clamp(at.y-extent.y*.5f, left.y+2*unit,right.y-extent.y-2*unit);
+        if (map.mode==2) {
+            const float radius=std::min(width,height)*.5f-std::hypot(extent.x*.5f+3*unit,extent.y*.5f+unit)-unit;
+            if (radius<=0) continue;
+            const float dx=x+extent.x*.5f-(left.x+width*.5f),dy=y+extent.y*.5f-(left.y+height*.5f);
+            const float distance=std::hypot(dx,dy);
+            if (distance>radius) { x-=dx*(1-radius/distance); y-=dy*(1-radius/distance); }
+        }
+        text(label,{x,y},size,color);
+    }
+    draw->PopClipRect();
+}
+
 extern "C" void __cdecl MeterOverlayEndFrame() {
     Lock lock;
     if (context && nativeFrame) {
         Ui::SetCurrentContext(context);
+        if (tradeOpen && !(nativeLayers & (1u<<static_cast<unsigned>(AddonUiLayer::Inventory)))) CloseTrade();
         UiPoint cursorCenter;
         const bool showCursor = CombatCursorPosition(cursorCenter);
-        if (graphics && worldVisible && (moveEditing || showCursor) && SUCCEEDED(graphics->TestCooperativeLevel()) && SUCCEEDED(graphics->BeginScene())) {
+        const bool showVendors=sallySamEnabled && !sallySamFrame.vendors.empty() && !addonsOpen && !tradeOpen && !moveEditing &&
+            !(nativeLayers & (1u<<static_cast<unsigned>(AddonUiLayer::Menu)));
+        if (graphics && worldVisible && (moveEditing || showCursor || showVendors) && SUCCEEDED(graphics->TestCooperativeLevel()) && SUCCEEDED(graphics->BeginScene())) {
+            if (showVendors) DrawSallySamMap();
             DrawMoveEditor();
             if (showCursor) { const float scale = GameScale().y; DrawCursorRing(cursorCenter,cursorOptions.radius*scale,scale,cursorOptions.color); }
             Ui::Flush();
@@ -2706,7 +2920,7 @@ extern "C" bool __cdecl MeterOverlayChatTimestampsEnabled() { Lock lock; return 
 extern "C" bool __cdecl MeterOverlayMouseLook(HWND* window,bool* blocked) {
     Lock lock;
     if (window) *window = gameWindow;
-    if (blocked) *blocked = !worldVisible || addonsOpen || leaderboardOpen || reportOpen || historyOpen || panelOptionsOpen || moveEditing || loadoutOpen || bankFrame.busy || loadoutFrame.busy;
+    if (blocked) *blocked = !worldVisible || tradeOpen || addonsOpen || leaderboardOpen || reportOpen || historyOpen || panelOptionsOpen || moveEditing || loadoutOpen || bankFrame.busy || loadoutFrame.busy;
     return addonRegistry.Enhanced() && mouseLookAvailable && mouseLookEnabled && !shuttingDown;
 }
 extern "C" bool __cdecl MeterOverlayController(Controller::Settings* settings,const Controller::Status* value,HWND* window,bool* blocked,IDirect3DDevice9* device) {
@@ -2716,10 +2930,98 @@ extern "C" bool __cdecl MeterOverlayController(Controller::Settings* settings,co
     if (settings) *settings=controllerOptions;
     if (value) controllerStatus=*value;
     if (window) *window=gameWindow;
-    if (blocked) *blocked=addonsOpen || leaderboardOpen || reportOpen || historyOpen || panelOptionsOpen || moveEditing || loadoutRenaming || bankFrame.busy || loadoutFrame.busy;
+    if (blocked) *blocked=tradeOpen || addonsOpen || leaderboardOpen || reportOpen || historyOpen || panelOptionsOpen || moveEditing || loadoutRenaming || bankFrame.busy || loadoutFrame.busy;
     return installed;
 }
 extern "C" void __cdecl MeterOverlayCursorCombat(uint64_t until) { Lock lock; cursorCombatUntil = until; }
+
+extern "C" bool __cdecl MeterOverlayTradeRequest(TradeAuction::Capture* request) {
+    Lock lock;
+    if (!tradeClient || !tradeEnabled || !worldVisible || shuttingDown) return false;
+    *request=tradeRequest;
+    tradeRequest={};
+    return true;
+}
+
+extern "C" bool __cdecl MeterOverlayTradeEnabled() {
+    Lock lock;
+    return tradeClient && tradeEnabled && worldVisible && !shuttingDown;
+}
+
+std::shared_ptr<const TradeAuction::WantedIndex> MeterOverlayTradeWanted(uint64_t now) {
+    Lock lock;
+    return tradeClient && tradeEnabled && worldVisible && !shuttingDown ? tradeClient->Wanted(now) : nullptr;
+}
+
+std::shared_ptr<const TradeAuction::LocalWatches> MeterOverlayTradeLocalWatches() {
+    Lock lock;
+    return tradeClient && tradeEnabled && worldVisible && !shuttingDown ? tradeWatchList.Snapshot() : nullptr;
+}
+
+void MeterOverlayTradeLocalAvailable(bool available) {
+    Lock lock;
+    tradeWatchAvailable=available;
+}
+
+extern "C" void __cdecl MeterOverlayTradeGeometry(const BankSortFrame& inventory,unsigned storage,bool held,uintptr_t image,
+    TradeAuction::Unpack unpack) {
+    Lock lock;
+    tradeGeometry=inventory;
+    tradeStorage=storage;
+    tradeHoldingItem=held;
+    tradeIcons.Bind(image,unpack);
+    if (tradeOpen && !inventory.visible) CloseTrade();
+}
+
+extern "C" void __cdecl MeterOverlayTradeSelection(const TradeAuction::Capture& request,bool success,std::string character,
+    uint32_t characterId,std::vector<TradeAuction::Choice> choices,TradeAuction::Item item) {
+    Lock lock;
+    if (!tradeOpen || !tradeCapturing) return;
+    tradeCapturing=false;
+    tradeStatus.clear();
+    if (request.kind==TradeAuction::Capture::Kind::Character) {
+        if (tradeScreen!=TradeScreen::Editor || !tradeDraft.WantedOnly() || tradeDraft.revision) return;
+        if (!success) { tradeStatus="Could not read your character. Try again."; return; }
+        if (tradeDraft.id.empty()) tradeDraft.id=TradeAuction::NewOfferId();
+        if (tradeDraft.id.empty()) { tradeStatus="Could not prepare an item request."; return; }
+        tradeDraft.character=std::move(character);
+        if (tradeClient && tradeClient->Request({},tradeDraft)) tradeStatus="Saving item request…";
+        else tradeStatus="Could not save the item request. Try again.";
+        return;
+    }
+    if (request.kind==TradeAuction::Capture::Kind::Confirm) {
+        if (tradeScreen!=TradeScreen::Editor || tradeDraft.revision) return;
+        if (!success || item.signature!=tradeDraft.item.signature || character!=tradeDraft.character) {
+            tradeStatus="The item changed or is unavailable. Select it again.";
+            return;
+        }
+        if (tradeClient && tradeClient->Request({},tradeDraft)) tradeStatus="Saving offer…";
+        else tradeStatus="Could not save the offer. Try again.";
+        return;
+    }
+    if (tradeScreen!=TradeScreen::Picker) return;
+    if (!success) { tradeStatus="Open Inventory or Bank and refresh Items."; return; }
+    if (request.kind==TradeAuction::Capture::Kind::Page) {
+        tradeCharacterId=characterId; tradeChoices=std::move(choices);
+        if (!tradeReplyItem.empty())
+            tradeChoices.erase(std::remove_if(tradeChoices.begin(),tradeChoices.end(),[](const TradeAuction::Choice& choice) {
+                return choice.definition!=tradeReplyItem;
+            }),tradeChoices.end());
+        return;
+    }
+    auto id=TradeAuction::NewOfferId();
+    if (id.empty()) { tradeStatus="Could not prepare a new offer."; return; }
+    tradeDraft={std::move(id),std::move(character),{},std::move(item),0,false,{},{},{}};
+    tradeOfferSource=request;
+    if (!tradeWantedSample.signature.empty()) {
+        tradeDraft.wantedDefinition=std::move(tradeWantedSample.definition);
+        tradeDraft.wantedSignature=std::move(tradeWantedSample.signature);
+        tradeDraft.wanted=std::move(tradeWantedSample.name);
+        tradeWantedSample={};
+    }
+    tradeStatOffset=0;
+    tradeScreen=TradeScreen::Editor;
+}
 
 extern "C" bool __cdecl MeterOverlayBankSettings(const BankSortFrame* value,BankSortCommand* action,bool* focused) {
     Lock lock;
@@ -2864,6 +3166,8 @@ extern "C" __declspec(dllexport) void __cdecl MeterOverlayWorld(bool shown) {
     worldVisible = shown;
     if (!shown) { characterSheetFrame = {}; cooldownFrame = {}; effectFrame = {}; cooldownHighlights.Reset(); healthFrame = {}; lowHpPreviewUntil = 0; }
     if (!shown) {
+        CloseTrade();
+        tradeGeometry={};
         hotkeyInput.recording=false; hotkeyMessage.clear();
         EndPanelResize(); hitCount = 0; dragging = false; wellTimerArea = {};
         addonsOpen = historyOpen = panelOptionsOpen = false;
@@ -2886,6 +3190,8 @@ extern "C" __declspec(dllexport) void __cdecl MeterOverlayInvalidate() {
 extern "C" __declspec(dllexport) void __cdecl MeterOverlayStop() {
     Lock lock;
     if (leaderboardClient) leaderboardClient->Stop();
+    CloseTrade();
+    tradeClient.reset();
     leaderboardOpen=false; leaderboardArea=leaderboardButtonRect={};
     EndPanelResize();
     shuttingDown = true;

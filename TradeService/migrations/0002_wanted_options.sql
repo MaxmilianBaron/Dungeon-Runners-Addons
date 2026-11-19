@@ -1,0 +1,1 @@
+ALTER TABLE offers ADD COLUMN wanted_options TEXT NOT NULL DEFAULT '[]';
