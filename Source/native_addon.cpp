@@ -31,6 +31,8 @@
 #include "native_bank_sort.h"
 #include "native_loadouts.h"
 #include "native_trade_auction.h"
+#include "native_quest_log.h"
+#include "mythic_collection.h"
 #include "native_sally_sam.h"
 #include "native_move_layout.h"
 #include "move_projection.h"
@@ -44,6 +46,10 @@ extern "C" void __cdecl MeterOverlayLayer(IDirect3DDevice9*,AddonUiLayer);
 extern "C" void __cdecl MeterOverlayEndFrame();
 bool MeterOverlaySallySamEnabled();
 void MeterOverlaySallySam(const SallySam::Frame& frame);
+bool MeterOverlayMythicCollectionEnabled();
+void MeterOverlayMythicCollection(const MythicCollection::Finds& items,uintptr_t base,decltype(&TradeAuction::Inflate) unpack);
+bool MeterOverlayQuestLog(const QuestLogFrame& frame);
+void MeterOverlayQuestLogInputTest(AddonInputTest test);
 extern "C" void __cdecl MeterOverlayInputTest(AddonInputTest);
 extern "C" void __cdecl MeterOverlayHotkeyTest(AddonHotkeyTest);
 extern "C" bool __cdecl MeterOverlayController(Controller::Settings*,const Controller::Status*,HWND*,bool*,IDirect3DDevice9*);
@@ -107,6 +113,8 @@ static NativeAccuracy accuracy;
 static CursorCombat cursorCombat;
 static NativeBankSort bankSort;
 static NativeBankSort inventorySort(true);
+static NativeQuestLog questLog;
+static bool questLogTitleAvailable=false;
 static NativeLoadouts loadouts;
 static NativeController controller;
 extern "C" void __cdecl MeterControllerRelease() { controller.Release(); }
@@ -411,6 +419,41 @@ static bool OverlayInput(float x,float y,bool menuLayer) {
     return reader.OverlayInput(VisibleControlAt(root,point),menuLayer);
 }
 
+static bool SetQuestLogTitle(uintptr_t label,const char* text) {
+    struct GameString {
+        uint32_t length;
+        char text[32];
+    } value{};
+    value.length=static_cast<uint32_t>(std::strlen(text));
+    if (value.length>=sizeof(value.text)) return false;
+    std::memcpy(value.text,text,value.length+1);
+    const GameString* argument=&value;
+    using SetText=void (__thiscall*)(void*,const GameString* const*);
+    __try {
+        reinterpret_cast<SetText>(image+NativeQuestLog::LabelSetText)(reinterpret_cast<void*>(label),&argument);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+
+static bool QuestLogInput(float x,float y,bool) {
+    const auto panel=questLog.Panel();
+    if (!panel || !std::isfinite(x) || !std::isfinite(y) || x<0 || y<0 || x>1 || y>1) return false;
+    const NativeReader reader(image,CopyMemoryChecked,LookupLabel);
+    const auto ui=reader.Pointer(image+0x5314b0),root=reader.Pointer(image+0x533e20);
+    int32_t width=0,height=0;
+    const auto modal=ui ? reader.Pointer(ui+0x180) : 0;
+    if (!reader.InWorld() || !questLog.AcceptsInput(reader,image,ui) ||
+        !root || !reader.Read(root+0xf8,width) || !reader.Read(root+0xfc,height) || width<1 || height<1 || width>16384 || height>16384) return false;
+    const int32_t point[]={static_cast<int32_t>(x*width),static_cast<int32_t>(y*height)};
+    auto target=VisibleControlAt(root,point);
+    if (target==ui || target==root) return !modal || modal==panel;
+    for (unsigned depth=0;target && depth<24;++depth) {
+        if (target==panel) return true;
+        target=reader.Pointer(target+0x14);
+    }
+    return false;
+}
+
 extern "C" void __cdecl MeterNativeTradeClearHover() {
     if (!InterlockedCompareExchange(&ready,0,0) || !tradeHoverAvailable) return;
     const NativeReader reader(image,CopyMemoryChecked,LookupLabel);
@@ -598,6 +641,29 @@ extern "C" uintptr_t __cdecl NameplateDispatch(unsigned kind,const HookRegisters
     return next;
 }
 
+static void ObserveMythicCollection(const NativeReader& reader,uint64_t now) {
+    static uint64_t next=0;
+    if (now<next) return;
+    next=now+1000;
+    if (!tradeNativeAvailable || !MeterOverlayMythicCollectionEnabled()) return;
+    const auto unit=reader.LocalAvatar();
+    if (!unit) return;
+    MythicCollection::Finds observed;
+    const auto collect=[&](const std::vector<uintptr_t>& items) {
+        for (const auto item:items) {
+            if (!NativeMythicSounds::Mythic(reader,image,item)) continue;
+            const auto definition=NativeBankSort::TradeDefinition(reader,item);
+            if (FindBankDefinition(definition.c_str()))
+                MythicCollection::Record(observed,std::string(TradeAuction::CanonicalDefinition(definition)),TradeAuction::ItemRollTier(reader,item));
+        }
+    };
+    std::vector<uintptr_t> items;
+    if (NativeBankSort::TradePage(reader,image,true,unit,items,false)) collect(items);
+    if (NativeBankSort::TradePage(reader,image,false,unit,items)) collect(items);
+    if (NativeLoadouts::CollectionEquipment(reader,image,unit,items)) collect(items);
+    MeterOverlayMythicCollection(observed,image,&TradeAuction::Inflate);
+}
+
 static void RefreshUi(const NativeReader& reader) {
     const uint64_t now = WindowsCompat::Milliseconds();
     Controller::Settings controllerSettings;
@@ -612,6 +678,11 @@ static void RefreshUi(const NativeReader& reader) {
     const uintptr_t ui = reader.Pointer(image + 0x5314b0);
     uint32_t localCharacter = 0;
     const bool shown = reader.InWorld(&localCharacter);
+    if (shown) ObserveMythicCollection(reader,now);
+    const bool questEnabled=shown && questLogTitleAvailable && MeterOverlayMythicCollectionEnabled();
+    const auto questFrame=questLogTitleAvailable ? questLog.Read(reader,image,ui,questEnabled) : QuestLogFrame{};
+    const bool collection=MeterOverlayQuestLog(questEnabled ? questFrame : QuestLogFrame{});
+    if (!questLog.SyncTitle(reader,image,collection,SetQuestLogTitle)) MeterOverlayQuestLog({});
     enhancedZoom.Service(reader,image,MeterOverlayEnhancedZoomEnabled());
     MoveLayoutSettings layoutSettings;
     const bool moveInstalled = MeterOverlayMoveSettings(&layoutSettings,nullptr);
@@ -960,6 +1031,7 @@ static void Observe(unsigned kind, const HookRegisters& registers) {
         else if (registers.edi == reader.Pointer(ui + 0x270)) layer = AddonUiLayer::CharacterSheet;
         else if (registers.edi == reader.Pointer(ui + 0x23c)) layer = AddonUiLayer::Bank;
         else if (registers.edi == reader.Pointer(ui + 0x230)) layer = AddonUiLayer::Inventory;
+        else if (registers.edi && registers.edi == questLog.Panel()) layer = AddonUiLayer::QuestLog;
         else return;
         if (!reader.InWorld()) return;
         if (layer == AddonUiLayer::CharacterSheet) {
@@ -1105,6 +1177,9 @@ static BOOL CALLBACK InitializeAddon() {
         const bool mouseLookCompatible = MouseLookProfileMatches(reader,image);
         const bool enhancedZoomCompatible = EnhancedZoomProfileMatches(reader,image);
         const bool chatTimestampsCompatible = ChatTimestampProfileMatches(reader,image);
+        questLogTitleAvailable=Matches({NativeQuestLog::LabelSetText,
+            "53568bf18b4c240c8b098d86bc00000085c974048b19eb0233db85c9740583c104eb05",nullptr,nullptr}) &&
+            Matches({0x1610,"56578bf885db767d8d7305c1ee0446c1e604",nullptr,nullptr});
         const auto settings = (addon / L"ui.ini").u8string();
         mythicSounds.Configure(directory / L"Addons" / L"MythicDropSounds");
         wishingWell.Configure(directory / L"Addons" / L"WishingWellTracker");
@@ -1113,6 +1188,7 @@ static BOOL CALLBACK InitializeAddon() {
         MeterOverlayTradeLocalAvailable(tradeLocalAvailable);
         MeterOverlayWorld(false);
         MeterOverlayInputTest(OverlayInput);
+        MeterOverlayQuestLogInputTest(QuestLogInput);
         MeterOverlayHotkeyTest(OverlayHotkey);
         MeterOverlayCharacterInputTest(CharacterInput);
         MeterOverlayBankInputTest(BankInput);

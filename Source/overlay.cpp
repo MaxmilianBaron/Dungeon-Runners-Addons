@@ -40,6 +40,7 @@
 #include "trade_auction_catalog.h"
 #include "trade_auction_icons.h"
 #include "trade_auction_layout.h"
+#include "mythic_collection.h"
 #include "sally_sam.h"
 #include "controller.h"
 #include "controller_discovery.h"
@@ -130,7 +131,17 @@ static uint32_t tradeCharacterId=0;
 static size_t tradeChoicePage=0,tradeStatOffset=0;
 static size_t tradeMarketPage=0,tradeMarketTarget=0;
 static bool tradeOpen=false,tradeTyping=false,tradeMine=false,tradeRefresh=false,tradeCapturing=false;
-static bool tradeEnabled=true,sallySamEnabled=true;
+static bool tradeEnabled=true,sallySamEnabled=true,mythicCollectionEnabled=true;
+static bool collectionLogOpen=false;
+static QuestLogFrame questLogFrame{};
+static AddonInputTest questLogInputTest=nullptr;
+static RECT collectionLogArea{},questArrows[2]{};
+
+static void ResetQuestLog() {
+    questLogFrame={};
+    collectionLogOpen=false;
+    collectionLogArea=questArrows[0]=questArrows[1]={};
+}
 static SallySam::Frame sallySamFrame;
 static RECT tradeArea{},tradeEntrance{},tradeSearchArea{},tradeScrollArea{};
 static RECT tradeTitleArea{},tradeResizeArea{};
@@ -508,6 +519,7 @@ struct Lock {
 static bool MouseInside(LPARAM value) {
     POINT point{GET_X_LPARAM(value), GET_Y_LPARAM(value)};
     if (PtInRect(&tradeArea,point) || PtInRect(&tradeEntrance,point)) return TradeMouseArea(point);
+    if (PtInRect(&collectionLogArea,point) || PtInRect(&questArrows[0],point) || PtInRect(&questArrows[1],point)) return true;
     for (unsigned i = 0; i < hitCount; ++i) if (PtInRect(&hitRects[i], point)) return true;
     return false;
 }
@@ -529,6 +541,8 @@ static bool InputAllowed(UiPoint point,bool menuLayer) {
     const auto display = Ui::GetIO().DisplaySize;
     const POINT pointer{static_cast<LONG>(point.x),static_cast<LONG>(point.y)};
     if (TradeMouseArea(pointer)) return true;
+    if (questLogInputTest && (PtInRect(&collectionLogArea,pointer) || PtInRect(&questArrows[0],pointer) || PtInRect(&questArrows[1],pointer)))
+        return display.x>0 && display.y>0 && questLogInputTest(point.x/display.x,point.y/display.y,false);
     if (loadoutInputTest && loadoutFrame.visible && (LoadoutContains(pointer) || PtInRect(&inventoryArea,pointer)) && display.x>0 && display.y>0) return loadoutInputTest(point.x/display.x,point.y/display.y,false);
     if (bankInputTest && bankFrame.visible && (PtInRect(&bankArea,pointer) || PtInRect(&bankPickerArea,pointer)) && display.x > 0 && display.y > 0) return bankInputTest(point.x/display.x,point.y/display.y,false);
     if (!nativeInputTest) return true;
@@ -2430,6 +2444,8 @@ static void DrawExtensionSettings(UiPoint origin,UiPoint scale) {
     if (DrawSkinControl("Back",point(185,232),scale)) activeAddon=nullptr;
 }
 
+#include "mythic_collection_ui.h"
+
 static void DiscoverAddons(const std::filesystem::path& root) {
     addonRegistry.Discover(root);
     registeredAddons.clear();
@@ -2445,7 +2461,7 @@ static void DiscoverAddons(const std::filesystem::path& root) {
     if (addonRegistry.MoveEverything()) registeredAddons.push_back({"moveeverything","Moveeverything","Move player, party, target, chat, minimap and buff/curse panels.",OpenMoveSettings,DrawMoveSettings,nullptr});
     if (addonRegistry.Loadouts()) registeredAddons.push_back({"loadouts","Loadouts & Sorting","Gear and hotbar loadouts, Inventory and selected bank page sorting.",OpenLoadoutSettings,DrawLoadoutSettings,nullptr});
     if (addonRegistry.ControllerEnabled()) registeredAddons.push_back({"controller","Controller","Gamepad movement, combat, consumables and menus.",OpenControllerSettings,DrawControllerSettings,nullptr});
-    if (addonRegistry.Enhanced() || addonRegistry.TradeAuction() || !addonRegistry.EnhancedToggles().empty()) registeredAddons.push_back({"enhanced-settings","Enhanced Settings","Camera, combat, chat and addon options.",OpenEnhancedSettings,DrawEnhancedSettings,nullptr});
+    if (addonRegistry.Enhanced() || addonRegistry.TradeAuction() || addonRegistry.MythicCollection() || !addonRegistry.EnhancedToggles().empty()) registeredAddons.push_back({"enhanced-settings","Enhanced Settings","Camera, combat, chat and addon options.",OpenEnhancedSettings,DrawEnhancedSettings,nullptr});
     for (const auto& extension:addonRegistry.Extensions()) registeredAddons.push_back({extension.id,extension.name,extension.description,OpenExtensionSettings,DrawExtensionSettings,&extension,addonRegistry.Settings(extension)});
 }
 
@@ -2530,8 +2546,8 @@ static void DrawAddons() {
         const float height = activeAddon ? (activeAddon->advanced || activeAddon->open == OpenControllerSettings ? 506.0f : activeAddon->open == OpenWellSettings ? 518.0f : activeAddon->open == OpenEnhancedSettings ? 533.0f+EnhancedExtraHeight() : activeAddon->open == OpenDamageSettings ? 390.0f : activeAddon->open == OpenNameplateSettings && !nameplatePage ? 340.0f : activeAddon->open == OpenMythicSettings ? 403.0f : activeAddon->open == OpenLoadoutSettings ? 342.0f : activeAddon->open == OpenCursorSettings ? 347.0f : 289.0f) : 125+listHeight;
         const bool controllerPanel=activeAddon && activeAddon->open==OpenControllerSettings;
         const auto preferred=controllerPanel ? UiPoint(std::max(buttonScale.x,1.5f),std::max(buttonScale.y,1.5f)) : buttonScale;
-        const UiPoint scale = FitScale(preferred,UiPoint(350,height));
-        const UiPoint panelSize(350 * scale.x,height * scale.y);
+        const auto scale=FitScale(preferred,UiPoint(350,height));
+        const UiPoint panelSize(350*scale.x,height*scale.y);
         const UiPoint origin(std::floor((display.x-panelSize.x)*0.5f),std::floor((display.y-panelSize.y)*0.5f));
         Ui::SetNextWindowPos(origin);
         Ui::SetNextWindowSize(panelSize);
@@ -2574,6 +2590,7 @@ extern "C" __declspec(dllexport) int __cdecl MeterOverlayStart(const char* iniFi
         }
     }
     tradeIcons.Configure(addonsDirectory.parent_path()/L"game.pkg");
+    if (addonRegistry.MythicCollection()) collectionBook.Initialize(MythicCollection::LocalPath());
     enhancedSettings = addonsDirectory / L"EnhancedSettings" / L"settings.ini";
     const auto enhanced = EnhancedSettings::Read(addonsDirectory);
     lowHpOptions = enhanced.health; healthFrame = {}; lowHpPreviewUntil = 0;
@@ -2583,6 +2600,7 @@ extern "C" __declspec(dllexport) int __cdecl MeterOverlayStart(const char* iniFi
     chatTimestampsEnabled = enhanced.chatTimestamps; chatTimestampsAvailable = false;
     tradeEnabled = enhanced.tradeAuction;
     sallySamEnabled = enhanced.sallySam;
+    mythicCollectionEnabled = enhanced.mythicCollection;
     controllerSettings=addonsDirectory/L"Controller"/L"settings.ini";
     controllerOptions={}; controllerStatus={};
     { std::ifstream input(controllerSettings); controllerOptions.Load(input); }
@@ -2743,8 +2761,12 @@ extern "C" void __cdecl MeterOverlayLayer(IDirect3DDevice9* device,AddonUiLayer 
     if (!worldVisible) { hitCount = 0; return; }
     if (!device) return;
     if (FAILED(device->TestCooperativeLevel())) { nativeFrame = false; hitCount = 0; return; }
-    if (layer != AddonUiLayer::Meter && (!nativeFrame || graphics != device)) return;
-    if (graphics && graphics != device) ShutdownUnlocked();
+    const bool canStartFrame=layer==AddonUiLayer::Meter || (layer==AddonUiLayer::QuestLog && questLogFrame.panel[2]>0);
+    if (!canStartFrame && (!nativeFrame || graphics!=device)) return;
+    if (graphics && graphics!=device) {
+        ShutdownUnlocked();
+        nativeFrame=false;
+    }
     if (!context && !InitializeGraphics(device)) return;
     if (!skinAttempted) {
         skinAttempted=true;
@@ -2755,8 +2777,7 @@ extern "C" void __cdecl MeterOverlayLayer(IDirect3DDevice9* device,AddonUiLayer 
     }
     const uint64_t now = WindowsCompat::Milliseconds();
     Ui::SetCurrentContext(context);
-    if (layer == AddonUiLayer::Meter) {
-        if (nativeFrame) Ui::EndFrame();
+    if (!nativeFrame) {
         Ui::NewFrame();
         nativeFrame = true;
         nativeLayers = 0;
@@ -2795,6 +2816,11 @@ extern "C" void __cdecl MeterOverlayLayer(IDirect3DDevice9* device,AddonUiLayer 
         if (tradeOpen) DrawTradeWindow(now);
         DrawHelp();
     }
+    else if (layer == AddonUiLayer::QuestLog) {
+        help.text.clear();
+        DrawQuestCollection();
+        DrawHelp();
+    }
     else DrawCooldowns(now,layer);
     Ui::Flush();
     Ui::SetInputEnabled(true);
@@ -2803,6 +2829,31 @@ extern "C" void __cdecl MeterOverlayLayer(IDirect3DDevice9* device,AddonUiLayer 
 bool MeterOverlaySallySamEnabled() {
     Lock lock;
     return addonRegistry.SallySam() && sallySamEnabled && !shuttingDown;
+}
+
+bool MeterOverlayMythicCollectionEnabled() {
+    Lock lock;
+    return addonRegistry.MythicCollection() && mythicCollectionEnabled && !shuttingDown;
+}
+
+void MeterOverlayMythicCollection(const MythicCollection::Finds& items,uintptr_t base,TradeAuction::Unpack unpack) {
+    Lock lock;
+    if (!addonRegistry.MythicCollection() || !mythicCollectionEnabled || shuttingDown) return;
+    tradeIcons.Bind(base,unpack);
+    collectionBook.Add(items);
+    if (collectionBook.Dirty()) collectionSaveAvailable=collectionBook.Sync();
+}
+
+bool MeterOverlayQuestLog(const QuestLogFrame& frame) {
+    Lock lock;
+    if (frame.panel[2]<=0 || !mythicCollectionEnabled || shuttingDown) ResetQuestLog();
+    else questLogFrame=frame;
+    return collectionLogOpen && QuestCollectionVisible();
+}
+
+void MeterOverlayQuestLogInputTest(AddonInputTest test) {
+    Lock lock;
+    questLogInputTest=test;
 }
 
 void MeterOverlaySallySam(const SallySam::Frame& frame) {
@@ -2874,6 +2925,8 @@ static void DrawSallySamMap() {
 
 extern "C" void __cdecl MeterOverlayEndFrame() {
     Lock lock;
+    if (!nativeFrame || !(nativeLayers & (1u<<static_cast<unsigned>(AddonUiLayer::QuestLog))))
+        collectionLogArea=questArrows[0]=questArrows[1]={};
     if (context && nativeFrame) {
         Ui::SetCurrentContext(context);
         if (tradeOpen && !(nativeLayers & (1u<<static_cast<unsigned>(AddonUiLayer::Inventory)))) CloseTrade();
@@ -3166,6 +3219,7 @@ extern "C" __declspec(dllexport) void __cdecl MeterOverlayWorld(bool shown) {
     worldVisible = shown;
     if (!shown) { characterSheetFrame = {}; cooldownFrame = {}; effectFrame = {}; cooldownHighlights.Reset(); healthFrame = {}; lowHpPreviewUntil = 0; }
     if (!shown) {
+        ResetQuestLog();
         CloseTrade();
         tradeGeometry={};
         hotkeyInput.recording=false; hotkeyMessage.clear();

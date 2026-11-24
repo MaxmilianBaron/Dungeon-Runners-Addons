@@ -212,6 +212,7 @@
       "GetDateFormatW",
       "GetDiskFreeSpaceExW",
       "GetEnvironmentStringsW",
+      "GetEnvironmentVariableW",
       "GetExitCodeProcess",
       "GetFileAttributesExW",
       "GetFileAttributesW",

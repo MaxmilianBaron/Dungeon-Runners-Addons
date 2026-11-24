@@ -5,11 +5,11 @@ struct EnhancedToggleDraft { int original, value; };
 static std::vector<EnhancedToggleDraft> enhancedToggleDraft;
 
 static float EnhancedExtraHeight() {
-    return 38.0f*static_cast<float>(addonRegistry.EnhancedToggles().size()+(addonRegistry.TradeAuction() ? 1u : 0u)+(addonRegistry.SallySam() ? 1u : 0u));
+    return 38.0f*static_cast<float>(addonRegistry.EnhancedToggles().size()+addonRegistry.TradeAuction()+addonRegistry.SallySam()+addonRegistry.MythicCollection());
 }
 
 static void OpenEnhancedSettings() {
-    draftEnhancedOptions = {lowHpOptions,unbindOptions.enabled,mouseLookEnabled,enhancedZoomEnabled,chatTimestampsEnabled,tradeEnabled,sallySamEnabled};
+    draftEnhancedOptions = {lowHpOptions,unbindOptions.enabled,mouseLookEnabled,enhancedZoomEnabled,chatTimestampsEnabled,tradeEnabled,sallySamEnabled,mythicCollectionEnabled};
     enhancedMessage.clear();
     lowHpPreviewUntil = 0;
     enhancedToggleDraft.clear();
@@ -71,12 +71,17 @@ static void DrawEnhancedSettings(UiPoint origin,UiPoint scale) {
     if (hasSallySam && OptionRow("Sally & Sam Finder:",draftEnhancedOptions.sallySam ? "On" : "Off",point(10,vendorY),scale,
         "Shows loaded Sally and Sam vendors on the minimap and map.",point(355,vendorY),origin.x))
         draftEnhancedOptions.sallySam = !draftEnhancedOptions.sallySam;
+    const bool hasCollection=addonRegistry.MythicCollection();
+    const float collectionY=vendorY+(hasSallySam ? 38.f : 0.f);
+    if (hasCollection && OptionRow("Mythic Collection:",draftEnhancedOptions.mythicCollection ? "On" : "Off",point(10,collectionY),scale,
+        "Adds Collection Log to Quest Log and records collected Mythic items.",point(355,collectionY),origin.x))
+        draftEnhancedOptions.mythicCollection = !draftEnhancedOptions.mythicCollection;
     const auto& toggles=addonRegistry.EnhancedToggles();
     for (size_t i=0;i<toggles.size();++i) {
         const auto& toggle=toggles[i];
         const auto& extension=addonRegistry.Extensions()[toggle.extension];
         auto& draft=enhancedToggleDraft[i];
-        const float y=324+38.0f*static_cast<float>(i+(hasTrade ? 1u : 0u)+(hasSallySam ? 1u : 0u));
+        const float y=collectionY+38.0f*static_cast<float>(i+hasCollection);
         Ui::PushID(static_cast<int>(i));
         if (OptionRow(toggle.label.c_str(),draft.value<0 ? "Unavailable" : draft.value ? "On" : "Off",
             point(10,y),scale,extension.options[toggle.option].help,point(355,y),origin.x) && draft.value>=0)
@@ -97,6 +102,8 @@ static void DrawEnhancedSettings(UiPoint origin,UiPoint scale) {
             chatTimestampsEnabled = draftEnhancedOptions.chatTimestamps;
             tradeEnabled = draftEnhancedOptions.tradeAuction;
             sallySamEnabled = draftEnhancedOptions.sallySam;
+            mythicCollectionEnabled = draftEnhancedOptions.mythicCollection;
+            if (!mythicCollectionEnabled) ResetQuestLog();
             if (!tradeEnabled) CloseTrade();
             lowHpPreviewUntil = 0;
             if (ApplyEnhancedToggles()) activeAddon = nullptr;

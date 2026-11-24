@@ -272,12 +272,12 @@ public:
         }
         return {};
     }
-    static uintptr_t TradeContainer(const NativeReader& reader,uintptr_t image,bool inventory,uintptr_t unit) {
+    static uintptr_t TradeContainer(const NativeReader& reader,uintptr_t image,bool inventory,uintptr_t unit,bool requireOpen=true) {
         const auto ui=reader.Pointer(image+0x5314b0);
         const auto panel=reader.Pointer(ui+(inventory ? 0x230 : 0x23c));
         uint32_t flags=0;
         if (!unit || !panel || reader.Pointer(ui+0x180) ||
-            !reader.Read(panel+0xb4,flags) || !(flags&8) ||
+            !reader.Read(panel+0xb4,flags) || (requireOpen && !(flags&8)) ||
             reader.Pointer(panel+(inventory ? 0x180 : 0x17c))!=unit) return 0;
         const auto container=reader.Pointer(panel+(inventory ? 0x188 : 0x180));
         return reader.Pointer(container+0x14)==unit ? container : 0;
@@ -289,8 +289,8 @@ public:
         held=(inventory && reader.Pointer(inventory+0x80)) || (bank && reader.Pointer(bank+0x80));
         return (inventory ? 1u : 0u)|(bank ? 2u : 0u);
     }
-    static bool TradePage(const NativeReader& reader,uintptr_t image,bool inventory,uintptr_t unit,std::vector<uintptr_t>& objects) {
-        const auto container=TradeContainer(reader,image,inventory,unit);
+    static bool TradePage(const NativeReader& reader,uintptr_t image,bool inventory,uintptr_t unit,std::vector<uintptr_t>& objects,bool requireOpen=true) {
+        const auto container=TradeContainer(reader,image,inventory,unit,requireOpen);
         uint16_t level=0;
         if (!container || !reader.Read(unit+0x314,level)) return false;
         std::vector<uintptr_t> items;

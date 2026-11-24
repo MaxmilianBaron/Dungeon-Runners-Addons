@@ -296,6 +296,7 @@ public:
         return true;
     }
 private:
+public:
     bool Rect(uintptr_t node, uintptr_t ui, std::array<int64_t, 4>& result) const {
         int32_t w = 0, h = 0;
         if (!Read(node + 0xf8, w) || !Read(node + 0xfc, h) || w <= 0 || h <= 0) return false;

@@ -21,7 +21,7 @@ private:
     std::vector<QuickToggle> quickToggles;
     bool damage = false, money = false, cooldowns = false, nameplates = false, characterSheet = false, mythicSounds = false, wishingWell = false, combatCursor = false, bankSort = false, moveEverything = false, loadouts = false, leaderboard = false;
     bool controller = false, lowHp = false, unbindLeft = false, enhanced = false;
-    bool tradeAuction = false, sallySam = false;
+    bool tradeAuction = false, sallySam = false, mythicCollection = false;
     unsigned rejected = 0;
 
     static bool Plain(const char* value,size_t size) {
@@ -77,7 +77,7 @@ public:
         return true;
     }
     void Discover(const std::filesystem::path& root) {
-        tradeAuction=sallySam=false;
+        tradeAuction=sallySam=mythicCollection=false;
         extensions.clear(); settings.clear(); statuses.clear(); quickToggles.clear();
         damage=money=cooldowns=nameplates=characterSheet=mythicSounds=wishingWell=combatCursor=bankSort=moveEverything=loadouts=leaderboard=controller=lowHp=unbindLeft=enhanced=false; rejected=0;
         std::error_code error;
@@ -99,6 +99,10 @@ public:
             if (builtin=="CooldownTimers" && id=="cooldown-timers") { cooldowns=true; continue; }
             if (builtin=="BetterCharacterSheet" && id=="better-character-sheet") { characterSheet=true; continue; }
             if (builtin=="MythicDropSounds" && id=="mythic-drop-sounds") { mythicSounds=true; continue; }
+            if (builtin=="MythicCollection" && id=="mythic-collection" && directory.filename()==L"MythicCollection") {
+                mythicCollection=true; continue;
+            }
+            if (id=="mythic-collection") { ++rejected; continue; }
             if (builtin=="WishingWellTracker" && id=="wishing-well-tracker") { wishingWell=true; continue; }
             if (builtin=="CursorCircle" && id=="cursor-circle") { combatCursor=true; continue; }
             if (builtin=="SortBankPages" && id=="sort-bank-pages") { bankSort=loadouts=true; continue; }
@@ -163,6 +167,7 @@ public:
     bool Cooldowns() const { return cooldowns; }
     bool CharacterSheet() const { return characterSheet; }
     bool MythicSounds() const { return mythicSounds; }
+    bool MythicCollection() const { return mythicCollection || enhanced; }
     bool WishingWell() const { return wishingWell; }
     bool CombatCursor() const { return combatCursor; }
     bool BankSort() const { return bankSort; }

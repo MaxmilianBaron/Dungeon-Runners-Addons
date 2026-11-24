@@ -49,6 +49,7 @@ class NativeMythicSounds {
         return remaining != 0 || (!(flags&1) && !(descriptionFlags&8));
     }
 
+public:
     static bool Mythic(const NativeReader& r,uintptr_t image,uintptr_t item) {
         const uintptr_t description = r.Pointer(item+0x5c);
         uint8_t quality = 0;
@@ -65,6 +66,7 @@ class NativeMythicSounds {
         }
         return quality == 7;
     }
+private:
     static bool Owned(const NativeReader& r,uintptr_t image,uint32_t owner,bool& own,uintptr_t& name) {
         own = false; name = 0;
         if (!owner) return false;

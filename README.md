@@ -36,7 +36,7 @@
 - **Sally & Sam Finder** — Shows loaded Sally and Sam variants on the minimap and map. On by default in Enhanced Settings.
 - **Leaderboard** — Official PvE rankings and PvP Rating; all time or this week.
 - **Controller** — Xbox/XInput and PS5 DualSense movement, combat and menus, with Xbox or PlayStation button labels. Steam Deck uses the Steam Input Gamepad template.
-- **Enhanced Settings** — Camera, attack controls, low-HP warning and optional local chat timestamps in `[HH:mm]` format.
+- **Enhanced Settings** — Camera, attack controls, low-HP warning and optional local chat timestamps in `[HH:mm]` format. Mythic Collection adds a Collection Log to Quest Log and tracks Mythic gear from equipment, inventory and opened banks across accounts and characters on this PC.
 
 <details>
 <summary>Mac / Linux setup</summary>

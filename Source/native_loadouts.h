@@ -257,6 +257,24 @@ class NativeLoadouts {
         else { waiting=false; frame.message="Could not put down the item. Make room in Inventory."; }
     }
 public:
+    static bool CollectionEquipment(const NativeReader& reader,uintptr_t image,uintptr_t unit,std::vector<uintptr_t>& objects) {
+        const auto ui=reader.Pointer(image+0x5314b0);
+        const auto panel=reader.Pointer(ui+0x230);
+        const auto equipment=reader.Pointer(panel+0x184);
+        if (!unit || !equipment || reader.Pointer(panel+0x180)!=unit) return false;
+        std::vector<uintptr_t> items;
+        std::set<uintptr_t> seen;
+        for (auto item=reader.Pointer(equipment+0x18);item;item=reader.Pointer(item+0x20)) {
+            if (seen.size()>=64 || !seen.insert(item).second) return false;
+            if (!reader.KindOf(item,image+0x530b80)) continue;
+            uint32_t flags=0,slot=0;
+            if (!reader.Read(item+0x60,flags) || !reader.Read(item+0x68,slot)) return false;
+            if (!(flags&1) && LoadoutSlotIndex(slot)>=0) items.push_back(item);
+        }
+        objects=std::move(items);
+        return true;
+    }
+
     const LoadoutFrame& Frame() const { return frame; }
     bool TakeBankSortRequest() { const bool result=sortRequested; sortRequested=false; return result; }
     void Reset() {
